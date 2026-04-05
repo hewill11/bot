@@ -213,31 +213,40 @@ function buildCreateEmbedModal(channelId) {
         .setCustomId('embed_description')
         .setLabel('Описание')
         .setStyle(TextInputStyle.Paragraph)
-        .setRequired(true)
+        .setRequired(false)
         .setMaxLength(4000)
         .setPlaceholder('Основной текст embed.');
 
-    const colorInput = new TextInputBuilder()
-        .setCustomId('embed_color')
-        .setLabel('Цвет')
-        .setStyle(TextInputStyle.Short)
+    const appearanceInput = new TextInputBuilder()
+        .setCustomId('embed_appearance')
+        .setLabel('Внешний вид')
+        .setStyle(TextInputStyle.Paragraph)
         .setRequired(false)
-        .setMaxLength(7)
-        .setPlaceholder('Например: #5865F2');
+        .setMaxLength(1000)
+        .setPlaceholder('color=#5865F2\nurl=https://example.com\ntimestamp=yes');
 
-    const footerInput = new TextInputBuilder()
-        .setCustomId('embed_footer')
-        .setLabel('Подвал')
-        .setStyle(TextInputStyle.Short)
+    const mediaInput = new TextInputBuilder()
+        .setCustomId('embed_media')
+        .setLabel('Картинки')
+        .setStyle(TextInputStyle.Paragraph)
         .setRequired(false)
-        .setMaxLength(2048)
-        .setPlaceholder('Например: Администрация EVOSMP');
+        .setMaxLength(1000)
+        .setPlaceholder('image=https://site/image.png\nthumbnail=https://site/thumb.png');
+
+    const metaInput = new TextInputBuilder()
+        .setCustomId('embed_meta')
+        .setLabel('Автор и footer')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false)
+        .setMaxLength(1000)
+        .setPlaceholder('author=EVOSMP\nauthorIcon=https://site/icon.png\nfooter=Администрация\nfooterIcon=https://site/footer.png');
 
     modal.addComponents(
         new ActionRowBuilder().addComponents(titleInput),
         new ActionRowBuilder().addComponents(descriptionInput),
-        new ActionRowBuilder().addComponents(colorInput),
-        new ActionRowBuilder().addComponents(footerInput),
+        new ActionRowBuilder().addComponents(appearanceInput),
+        new ActionRowBuilder().addComponents(mediaInput),
+        new ActionRowBuilder().addComponents(metaInput),
     );
 
     return modal;
@@ -560,19 +569,49 @@ async function handleEmbedSubmit(interaction) {
         return;
     }
 
-    const description = interaction.fields.getTextInputValue('embed_description').trim();
+    const description = normalizeOptionalText(interaction.fields.getTextInputValue('embed_description'));
     const title = normalizeOptionalText(interaction.fields.getTextInputValue('embed_title'));
-    const colorInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_color'));
-    const footer = normalizeOptionalText(interaction.fields.getTextInputValue('embed_footer'));
-    const color = parseEmbedColor(colorInput);
+    const appearanceInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_appearance'));
+    const mediaInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_media'));
+    const metaInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_meta'));
 
-    if (colorInput && color === null) {
+    if (!title && !description) {
+        await replyEphemeral(interaction, 'Нужно заполнить хотя бы заголовок или описание embed.');
+        return;
+    }
+
+    const appearance = parseKeyValueBlock(appearanceInput);
+    const media = parseKeyValueBlock(mediaInput);
+    const meta = parseKeyValueBlock(metaInput);
+
+    if (appearance.errors.length || media.errors.length || meta.errors.length) {
+        await replyEphemeral(interaction, [...appearance.errors, ...media.errors, ...meta.errors].join('\n'));
+        return;
+    }
+
+    const color = parseEmbedColor(appearance.values.color || null);
+
+    if (appearance.values.color && color === null) {
         await replyEphemeral(interaction, 'Цвет нужно указать в формате `#RRGGBB` или `RRGGBB`.');
         return;
     }
 
+    const imageUrl = validateHttpUrl(media.values.image || null);
+    const thumbnailUrl = validateHttpUrl(media.values.thumbnail || null);
+    const embedUrl = validateHttpUrl(appearance.values.url || null);
+    const authorIconUrl = validateHttpUrl(meta.values.authoricon || null);
+    const footerIconUrl = validateHttpUrl(meta.values.footericon || null);
+
+    if ((media.values.image && !imageUrl) ||
+        (media.values.thumbnail && !thumbnailUrl) ||
+        (appearance.values.url && !embedUrl) ||
+        (meta.values.authoricon && !authorIconUrl) ||
+        (meta.values.footericon && !footerIconUrl)) {
+        await replyEphemeral(interaction, 'Все ссылки должны быть полными URL в формате `http://` или `https://`.');
+        return;
+    }
+
     const embed = new EmbedBuilder()
-        .setDescription(description)
         .setColor(color ?? 0x5865F2)
         .setTimestamp();
 
@@ -580,8 +619,44 @@ async function handleEmbedSubmit(interaction) {
         embed.setTitle(title);
     }
 
-    if (footer) {
-        embed.setFooter({ text: footer });
+    if (description) {
+        embed.setDescription(description);
+    }
+
+    if (embedUrl) {
+        embed.setURL(embedUrl);
+    }
+
+    if (imageUrl) {
+        embed.setImage(imageUrl);
+    }
+
+    if (thumbnailUrl) {
+        embed.setThumbnail(thumbnailUrl);
+    }
+
+    if (meta.values.author) {
+        const authorOptions = { name: meta.values.author };
+
+        if (authorIconUrl) {
+            authorOptions.iconURL = authorIconUrl;
+        }
+
+        embed.setAuthor(authorOptions);
+    }
+
+    if (meta.values.footer) {
+        const footerOptions = { text: meta.values.footer };
+
+        if (footerIconUrl) {
+            footerOptions.iconURL = footerIconUrl;
+        }
+
+        embed.setFooter(footerOptions);
+    }
+
+    if (!shouldUseTimestamp(appearance.values.timestamp)) {
+        embed.setTimestamp(null);
     }
 
     await targetChannel.send({
@@ -715,6 +790,69 @@ function parseEmbedColor(value) {
     }
 
     return Number.parseInt(normalized, 16);
+}
+
+function parseKeyValueBlock(value) {
+    if (!value) {
+        return {
+            values: {},
+            errors: [],
+        };
+    }
+
+    const values = {};
+    const errors = [];
+    const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+
+    for (const line of lines) {
+        const separatorIndex = line.indexOf('=');
+
+        if (separatorIndex === -1) {
+            errors.push(`Не удалось разобрать строку: \`${line}\`. Используй формат \`ключ=значение\`.`);
+            continue;
+        }
+
+        const key = line.slice(0, separatorIndex).trim().toLowerCase();
+        const parsedValue = line.slice(separatorIndex + 1).trim();
+
+        if (!key || !parsedValue) {
+            errors.push(`Не удалось разобрать строку: \`${line}\`. Используй формат \`ключ=значение\`.`);
+            continue;
+        }
+
+        values[key] = parsedValue;
+    }
+
+    return {
+        values,
+        errors,
+    };
+}
+
+function validateHttpUrl(value) {
+    if (!value) {
+        return null;
+    }
+
+    try {
+        const url = new URL(value);
+
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+            return null;
+        }
+
+        return url.toString();
+    } catch (error) {
+        return null;
+    }
+}
+
+function shouldUseTimestamp(value) {
+    if (!value) {
+        return true;
+    }
+
+    return !['no', 'false', '0', 'off'].includes(value.trim().toLowerCase());
 }
 
 async function hydrateLegacyApplicationFromChannel(userId) {
