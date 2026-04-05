@@ -298,6 +298,75 @@ function buildModerationButtons(userId) {
     );
 }
 
+function buildApplicationPanelEmbed() {
+    const panelColor = parseEmbedColor(process.env.PANEL_COLOR || null) ?? 0x8B3D67;
+    const panelImageUrl = validateHttpUrl(process.env.PANEL_IMAGE_URL || null);
+    const panelThumbnailUrl = validateHttpUrl(process.env.PANEL_THUMBNAIL_URL || null);
+    const shopChannelMention = process.env.SHOP_CHANNEL_ID ? `<#${process.env.SHOP_CHANNEL_ID}>` : null;
+    const descriptionParts = [
+        'Наш сервер является приватным, и мы внимательно отбираем игроков, чтобы сохранить дружелюбную и спокойную атмосферу.',
+        '',
+        '**⚠️ Важные моменты**',
+        '> 1. Повторная подача заявки отключена.',
+        '> 2. Не пишите администрации по статусу заявки до решения.',
+        '> 3. Развернутые ответы повышают шанс одобрения.',
+    ];
+
+    if (shopChannelMention) {
+        descriptionParts.push(
+            '',
+            '**💸 Купить проходку**',
+            `> Если не хотите ждать рассмотрения заявки, переходите в ${shopChannelMention}.`,
+        );
+    }
+
+    descriptionParts.push(
+        '',
+        '**Надеемся, ваша заявка станет началом долгого и интересного приключения на сервере.**',
+    );
+
+    const embed = new EmbedBuilder()
+        .setTitle('🎮 Подать заявку на сервер')
+        .setDescription(descriptionParts.join('\n'))
+        .setColor(panelColor)
+        .setFooter({
+            text: process.env.PANEL_FOOTER_TEXT || 'EVOSMP | Начать играть',
+        });
+
+    if (panelImageUrl) {
+        embed.setImage(panelImageUrl);
+    }
+
+    if (panelThumbnailUrl) {
+        embed.setThumbnail(panelThumbnailUrl);
+    }
+
+    return embed;
+}
+
+function buildApplicationPanelComponents() {
+    const buttons = [
+        new ButtonBuilder()
+            .setCustomId(OPEN_APPLICATION_BUTTON_ID)
+            .setLabel('Подать заявку')
+            .setStyle(ButtonStyle.Primary),
+    ];
+    const secondaryUrl = validateHttpUrl(process.env.PANEL_SECONDARY_URL || null);
+
+    if (secondaryUrl) {
+        buttons.push(
+            new ButtonBuilder()
+                .setLabel(process.env.PANEL_SECONDARY_LABEL || 'Купить проходку')
+                .setStyle(ButtonStyle.Link)
+                .setURL(secondaryUrl),
+        );
+    }
+
+    return [
+        new ActionRowBuilder().addComponents(...buttons),
+    ];
+}
+
 async function ensureApplicationPanel() {
     const panelChannel = await client.channels.fetch(process.env.PANEL_CHANNEL_ID);
 
@@ -313,26 +382,18 @@ async function ensureApplicationPanel() {
         ),
     );
 
+    const panelPayload = {
+        embeds: [buildApplicationPanelEmbed()],
+        components: buildApplicationPanelComponents(),
+    };
+
     if (existingPanel) {
+        await existingPanel.edit(panelPayload);
         return;
     }
 
-    const panelEmbed = new EmbedBuilder()
-        .setTitle('Анкета на участие в проекте EVOSMP')
-        .setDescription('Нажми кнопку ниже, чтобы заполнить анкету.\n\nПовторная подача заявки отключена.')
-        .setColor(0x5865F2)
-        .setFooter({ text: 'После отправки заявка попадет администрации.' });
-
-    const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-            .setCustomId(OPEN_APPLICATION_BUTTON_ID)
-            .setLabel('Подать заявку')
-            .setStyle(ButtonStyle.Primary),
-    );
-
     await panelChannel.send({
-        embeds: [panelEmbed],
-        components: [row],
+        ...panelPayload,
     });
 }
 
