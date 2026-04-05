@@ -687,8 +687,8 @@ async function handleEmbedSubmit(interaction) {
     const mediaInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_media'));
     const metaInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_meta'));
 
-    if (!title && !description) {
-        await replyEphemeral(interaction, 'Нужно заполнить хотя бы заголовок или описание embed.');
+    if (!title && !description && !appearanceInput && !mediaInput && !metaInput) {
+        await replyEphemeral(interaction, 'Нужно заполнить хотя бы одно поле (например, вставить картинку), чтобы embed не был абсолютно пустым.');
         return;
     }
 
