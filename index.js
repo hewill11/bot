@@ -196,10 +196,15 @@ function buildApplicationModal() {
     return modal;
 }
 
-function buildCreateEmbedModal(channelId) {
+function buildCreateEmbedModal(channelId, messageId = null, existingData = {}) {
+    // Сохраняем и ID канала, и ID сообщения (если есть) в CustomID
+    const customId = messageId
+        ? `${EMBED_MODAL_PREFIX}:${channelId}:${messageId}`
+        : `${EMBED_MODAL_PREFIX}:${channelId}`;
+
     const modal = new ModalBuilder()
-        .setCustomId(`${EMBED_MODAL_PREFIX}:${channelId}`)
-        .setTitle('Создание embed');
+        .setCustomId(customId)
+        .setTitle(messageId ? 'Редактирование embed' : 'Создание embed');
 
     const titleInput = new TextInputBuilder()
         .setCustomId('embed_title')
@@ -209,6 +214,8 @@ function buildCreateEmbedModal(channelId) {
         .setMaxLength(256)
         .setPlaceholder('Например: Новости проекта');
 
+    if (existingData.title) titleInput.setValue(existingData.title);
+
     const descriptionInput = new TextInputBuilder()
         .setCustomId('embed_description')
         .setLabel('Описание')
@@ -217,13 +224,17 @@ function buildCreateEmbedModal(channelId) {
         .setMaxLength(4000)
         .setPlaceholder('Основной текст embed.');
 
+    if (existingData.description) descriptionInput.setValue(existingData.description);
+
     const appearanceInput = new TextInputBuilder()
         .setCustomId('embed_appearance')
         .setLabel('Внешний вид')
         .setStyle(TextInputStyle.Paragraph)
         .setRequired(false)
         .setMaxLength(1000)
-        .setPlaceholder('color=#5865F2 | url=https://ex.com | timestamp=yes');
+        .setPlaceholder('color=#5865F2\nurl=https://ex.com\ntimestamp=yes');
+
+    if (existingData.appearance) appearanceInput.setValue(existingData.appearance);
 
     const mediaInput = new TextInputBuilder()
         .setCustomId('embed_media')
@@ -231,7 +242,9 @@ function buildCreateEmbedModal(channelId) {
         .setStyle(TextInputStyle.Paragraph)
         .setRequired(false)
         .setMaxLength(1000)
-        .setPlaceholder('image=https://ex.com/i.png | thumbnail=https://ex.com/t.png');
+        .setPlaceholder('image=https://ex.com/i.png\nthumbnail=https://ex.com/t.png');
+
+    if (existingData.media) mediaInput.setValue(existingData.media);
 
     const metaInput = new TextInputBuilder()
         .setCustomId('embed_meta')
@@ -239,7 +252,9 @@ function buildCreateEmbedModal(channelId) {
         .setStyle(TextInputStyle.Paragraph)
         .setRequired(false)
         .setMaxLength(1000)
-        .setPlaceholder('author=EVOSMP | footer=Админка | authorIcon=https://ex.com/a.png');
+        .setPlaceholder('author=EVOSMP\nfooter=Админка\nauthorIcon=https://ex.com/a.png');
+
+    if (existingData.meta) metaInput.setValue(existingData.meta);
 
     modal.addComponents(
         new ActionRowBuilder().addComponents(titleInput),
@@ -410,18 +425,43 @@ async function handleApplicationOpen(interaction) {
 
 async function handleEmbedCommand(interaction) {
     if (!hasStaffRole(interaction)) {
-        await replyEphemeral(interaction, 'У вас нет прав для создания embed.');
+        await replyEphemeral(interaction, 'У вас нет прав для создания или редактирования embed.');
         return;
     }
 
     const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
+    const messageId = interaction.options.getString('message_id');
 
     if (!targetChannel || !targetChannel.isTextBased() || !('send' in targetChannel)) {
         await replyEphemeral(interaction, 'Нужен текстовый канал, куда бот сможет отправить embed.');
         return;
     }
 
-    await interaction.showModal(buildCreateEmbedModal(targetChannel.id));
+    let existingData = {};
+
+    if (messageId) {
+        try {
+            const message = await targetChannel.messages.fetch(messageId);
+
+            // Защита: бот может редактировать только свои сообщения
+            if (message.author.id !== client.user.id) {
+                await replyEphemeral(interaction, 'Я могу редактировать только те сообщения, которые отправлял сам.');
+                return;
+            }
+
+            if (message.embeds.length > 0) {
+                existingData = deconstructEmbed(message.embeds[0]);
+            } else {
+                await replyEphemeral(interaction, 'В этом сообщении нет embed для редактирования.');
+                return;
+            }
+        } catch (error) {
+            await replyEphemeral(interaction, 'Не удалось найти сообщение с таким ID в указанном канале.');
+            return;
+        }
+    }
+
+    await interaction.showModal(buildCreateEmbedModal(targetChannel.id, messageId, existingData));
 }
 
 async function handleApplicationSubmit(interaction) {
@@ -618,15 +658,18 @@ async function handleReject(interaction) {
 
 async function handleEmbedSubmit(interaction) {
     if (!hasStaffRole(interaction)) {
-        await replyEphemeral(interaction, 'У вас нет прав для создания embed.');
+        await replyEphemeral(interaction, 'У вас нет прав для работы с embed.');
         return;
     }
 
-    const [, channelId] = interaction.customId.split(':');
+    const parts = interaction.customId.split(':');
+    const channelId = parts[1];
+    const messageId = parts[2]; // Будет undefined, если это создание нового embed
+
     const targetChannel = await client.channels.fetch(channelId).catch(() => null);
 
     if (!targetChannel || !targetChannel.isTextBased() || !('send' in targetChannel)) {
-        await replyEphemeral(interaction, 'Не удалось найти текстовый канал для отправки embed.');
+        await replyEphemeral(interaction, 'Не удалось найти текстовый канал для отправки/редактирования embed.');
         return;
     }
 
@@ -720,14 +763,57 @@ async function handleEmbedSubmit(interaction) {
         embed.setTimestamp(null);
     }
 
-    await targetChannel.send({
-        embeds: [embed],
-    });
+    // Если передан ID сообщения, пытаемся его отредактировать
+    if (messageId) {
+        try {
+            const messageToEdit = await targetChannel.messages.fetch(messageId);
+            await messageToEdit.edit({ embeds: [embed] });
+            await interaction.reply({
+                content: `Embed успешно обновлён! ID сообщения: \`${messageId}\``,
+                ephemeral: true,
+            });
+        } catch (error) {
+            console.error('Ошибка при редактировании сообщения:', error);
+            await replyEphemeral(interaction, 'Не удалось обновить сообщение. Возможно, оно было удалено.');
+        }
+    } else {
+        // Иначе создаем новое
+        const sentMessage = await targetChannel.send({ embeds: [embed] });
+        await interaction.reply({
+            content: `Embed отправлен в канал <#${targetChannel.id}>. ID: \`${sentMessage.id}\` (сохрани ID, если захочешь отредактировать его позже)`,
+            ephemeral: true,
+        });
+    }
+}
 
-    await interaction.reply({
-        content: `Embed отправлен в канал <#${targetChannel.id}>.`,
-        ephemeral: true,
-    });
+// Новая функция-помощник для "распаковки" старого Embed обратно в текстовые ключи
+function deconstructEmbed(embed) {
+    if (!embed) return {};
+
+    const appearance = [];
+    if (embed.color !== null && embed.color !== undefined) {
+        appearance.push(`color=#${embed.color.toString(16).padStart(6, '0')}`);
+    }
+    if (embed.url) appearance.push(`url=${embed.url}`);
+    if (embed.timestamp) appearance.push(`timestamp=yes`);
+
+    const media = [];
+    if (embed.image?.url) media.push(`image=${embed.image.url}`);
+    if (embed.thumbnail?.url) media.push(`thumbnail=${embed.thumbnail.url}`);
+
+    const meta = [];
+    if (embed.author?.name) meta.push(`author=${embed.author.name}`);
+    if (embed.author?.iconURL) meta.push(`authorIcon=${embed.author.iconURL}`);
+    if (embed.footer?.text) meta.push(`footer=${embed.footer.text}`);
+    if (embed.footer?.iconURL) meta.push(`footerIcon=${embed.footer.iconURL}`);
+
+    return {
+        title: embed.title || '',
+        description: embed.description || '',
+        appearance: appearance.join('\n'), // Склеиваем переносом строки для корректного парсинга
+        media: media.join('\n'),
+        meta: meta.join('\n'),
+    };
 }
 
 function ensureApplicationRecordFromMessage(interaction, userId) {

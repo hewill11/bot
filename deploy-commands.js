@@ -10,11 +10,17 @@ const commands = [
         .setDescription('Открыть анкету на Minecraft сервер'),
     new SlashCommandBuilder()
         .setName('embed')
-        .setDescription('Создать полноценный embed и отправить его в канал')
+        .setDescription('Создать или изменить embed и отправить его в канал')
         .addChannelOption((option) =>
             option
                 .setName('channel')
-                .setDescription('Канал, куда отправить embed')
+                .setDescription('Канал (по умолчанию тот, где вы пишете)')
+                .setRequired(false),
+        )
+        .addStringOption((option) =>
+            option
+                .setName('message_id')
+                .setDescription('ID сообщения бота для редактирования')
                 .setRequired(false),
         ),
 ].map((command) => command.toJSON());
