@@ -223,7 +223,7 @@ function buildCreateEmbedModal(channelId) {
         .setStyle(TextInputStyle.Paragraph)
         .setRequired(false)
         .setMaxLength(1000)
-        .setPlaceholder('color=#5865F2\nurl=https://example.com\ntimestamp=yes');
+        .setPlaceholder('color=#5865F2 | url=https://ex.com | timestamp=yes');
 
     const mediaInput = new TextInputBuilder()
         .setCustomId('embed_media')
@@ -231,7 +231,7 @@ function buildCreateEmbedModal(channelId) {
         .setStyle(TextInputStyle.Paragraph)
         .setRequired(false)
         .setMaxLength(1000)
-        .setPlaceholder('image=https://site/image.png\nthumbnail=https://site/thumb.png');
+        .setPlaceholder('image=https://ex.com/i.png | thumbnail=https://ex.com/t.png');
 
     const metaInput = new TextInputBuilder()
         .setCustomId('embed_meta')
@@ -239,7 +239,7 @@ function buildCreateEmbedModal(channelId) {
         .setStyle(TextInputStyle.Paragraph)
         .setRequired(false)
         .setMaxLength(1000)
-        .setPlaceholder('author=EVOSMP\nauthorIcon=https://site/icon.png\nfooter=Администрация\nfooterIcon=https://site/footer.png');
+        .setPlaceholder('author=EVOSMP | footer=Админка | authorIcon=https://ex.com/a.png');
 
     modal.addComponents(
         new ActionRowBuilder().addComponents(titleInput),
