@@ -1,0 +1,20 @@
+[33mf0a284c[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m fix index
+[33m4e15fd1[m embed
+[33m78effd8[m emdeb2
+[33mc2234c7[m emdeb
+[33m42f2447[m бан при отклонении
+[33m54275d3[m fix
+[33mb510d62[m fix
+[33m5676b84[m user id
+[33m82f7a0c[m Удаление канала после прохождения
+[33mdf8e1a8[m Название и описание
+[33md1584b9[m описание
+[33m3bfd17a[m change slash commands to анкета and заявка
+[33m03dab1f[m fix token and env
+[33m9452729[m more login debug
+[33m26799f3[m add ready event
+[33m1ff4703[m remove dotenv for render
+[33m1bc1278[m add discord debug logs
+[33m857db80[m fix render port
+[33m87a6b3a[m fix render port
+[33m89d1009[m first commit
