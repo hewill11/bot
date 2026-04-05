@@ -430,7 +430,7 @@ async function handleEmbedCommand(interaction) {
     }
 
     const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
-    const messageId = interaction.options.getString('message_id');
+    let messageId = interaction.options.getString('message_id');
 
     if (!targetChannel || !targetChannel.isTextBased() || !('send' in targetChannel)) {
         await replyEphemeral(interaction, 'Нужен текстовый канал, куда бот сможет отправить embed.');
@@ -440,6 +440,13 @@ async function handleEmbedCommand(interaction) {
     let existingData = {};
 
     if (messageId) {
+        // Если пользователь передал ссылку вместо ID, достаем только сам ID (цифры после последнего слэша)
+        if (messageId.includes('/')) {
+            messageId = messageId.split('/').pop().trim();
+        } else {
+            messageId = messageId.trim();
+        }
+
         try {
             const message = await targetChannel.messages.fetch(messageId);
 
@@ -996,10 +1003,10 @@ function validateHttpUrl(value) {
 
 function shouldUseTimestamp(value) {
     if (!value) {
-        return true;
+        return false; // Раньше тут было true. Теперь по умолчанию время выключено.
     }
 
-    return !['no', 'false', '0', 'off'].includes(value.trim().toLowerCase());
+    return ['yes', 'true', '1', 'on'].includes(value.trim().toLowerCase());
 }
 
 async function hydrateLegacyApplicationFromChannel(userId) {
