@@ -197,10 +197,8 @@ function buildApplicationModal() {
 }
 
 function buildCreateEmbedModal(channelId, messageId = null, existingData = {}) {
-    // Сохраняем и ID канала, и ID сообщения (если есть) в CustomID
-    const customId = messageId
-        ? `${EMBED_MODAL_PREFIX}:${channelId}:${messageId}`
-        : `${EMBED_MODAL_PREFIX}:${channelId}`;
+    const safeMessageId = messageId ? messageId : 'none';
+    const customId = `${EMBED_MODAL_PREFIX}:${channelId}:${safeMessageId}:${Date.now()}`;
 
     const modal = new ModalBuilder()
         .setCustomId(customId)
@@ -397,15 +395,14 @@ async function ensureApplicationPanel() {
         ),
     );
 
+    if (existingPanel) {
+        return;
+    }
+
     const panelPayload = {
         embeds: [buildApplicationPanelEmbed()],
         components: buildApplicationPanelComponents(),
     };
-
-    if (existingPanel) {
-        await existingPanel.edit(panelPayload);
-        return;
-    }
 
     await panelChannel.send({
         ...panelPayload,
@@ -440,7 +437,6 @@ async function handleEmbedCommand(interaction) {
     let existingData = {};
 
     if (messageId) {
-        // Если пользователь передал ссылку вместо ID, достаем только сам ID (цифры после последнего слэша)
         if (messageId.includes('/')) {
             messageId = messageId.split('/').pop().trim();
         } else {
@@ -448,9 +444,13 @@ async function handleEmbedCommand(interaction) {
         }
 
         try {
+            // ВАЖНО: Удаляем сообщение из локального кеша бота перед запросом!
+            // Это заставит бота честно сходить на серверы Discord и взять самую новую версию.
+            targetChannel.messages.cache.delete(messageId);
+
+            // Запрашиваем актуальное сообщение
             const message = await targetChannel.messages.fetch(messageId);
 
-            // Защита: бот может редактировать только свои сообщения
             if (message.author.id !== client.user.id) {
                 await replyEphemeral(interaction, 'Я могу редактировать только те сообщения, которые отправлял сам.');
                 return;
@@ -463,6 +463,7 @@ async function handleEmbedCommand(interaction) {
                 return;
             }
         } catch (error) {
+            console.error(error);
             await replyEphemeral(interaction, 'Не удалось найти сообщение с таким ID в указанном канале.');
             return;
         }
@@ -671,7 +672,7 @@ async function handleEmbedSubmit(interaction) {
 
     const parts = interaction.customId.split(':');
     const channelId = parts[1];
-    const messageId = parts[2]; // Будет undefined, если это создание нового embed
+    const messageId = parts[2] === 'none' ? null : parts[2];
 
     const targetChannel = await client.channels.fetch(channelId).catch(() => null);
 
@@ -770,7 +771,6 @@ async function handleEmbedSubmit(interaction) {
         embed.setTimestamp(null);
     }
 
-    // Если передан ID сообщения, пытаемся его отредактировать
     if (messageId) {
         try {
             const messageToEdit = await targetChannel.messages.fetch(messageId);
@@ -784,7 +784,6 @@ async function handleEmbedSubmit(interaction) {
             await replyEphemeral(interaction, 'Не удалось обновить сообщение. Возможно, оно было удалено.');
         }
     } else {
-        // Иначе создаем новое
         const sentMessage = await targetChannel.send({ embeds: [embed] });
         await interaction.reply({
             content: `Embed отправлен в канал <#${targetChannel.id}>. ID: \`${sentMessage.id}\` (сохрани ID, если захочешь отредактировать его позже)`,
@@ -793,31 +792,39 @@ async function handleEmbedSubmit(interaction) {
     }
 }
 
-// Новая функция-помощник для "распаковки" старого Embed обратно в текстовые ключи
 function deconstructEmbed(embed) {
     if (!embed) return {};
 
+    // Используем raw-данные объекта, чтобы обойти любые возможные ошибки геттеров discord.js
+    const data = embed.data || embed;
+
     const appearance = [];
-    if (embed.color !== null && embed.color !== undefined) {
-        appearance.push(`color=#${embed.color.toString(16).padStart(6, '0')}`);
+    if (data.color !== null && data.color !== undefined) {
+        appearance.push(`color=#${data.color.toString(16).padStart(6, '0')}`);
     }
-    if (embed.url) appearance.push(`url=${embed.url}`);
-    if (embed.timestamp) appearance.push(`timestamp=yes`);
+    if (data.url) appearance.push(`url=${data.url}`);
+    if (data.timestamp) appearance.push(`timestamp=yes`);
 
     const media = [];
-    if (embed.image?.url) media.push(`image=${embed.image.url}`);
-    if (embed.thumbnail?.url) media.push(`thumbnail=${embed.thumbnail.url}`);
+    if (data.image?.url) media.push(`image=${data.image.url}`);
+    if (data.thumbnail?.url) media.push(`thumbnail=${data.thumbnail.url}`);
 
     const meta = [];
-    if (embed.author?.name) meta.push(`author=${embed.author.name}`);
-    if (embed.author?.iconURL) meta.push(`authorIcon=${embed.author.iconURL}`);
-    if (embed.footer?.text) meta.push(`footer=${embed.footer.text}`);
-    if (embed.footer?.iconURL) meta.push(`footerIcon=${embed.footer.iconURL}`);
+    if (data.author?.name) meta.push(`author=${data.author.name}`);
+
+    // В raw-данных иконка может называться icon_url или iconURL в зависимости от версии
+    const authorIcon = data.author?.icon_url || data.author?.iconURL;
+    if (authorIcon) meta.push(`authorIcon=${authorIcon}`);
+
+    if (data.footer?.text) meta.push(`footer=${data.footer.text}`);
+
+    const footerIcon = data.footer?.icon_url || data.footer?.iconURL;
+    if (footerIcon) meta.push(`footerIcon=${footerIcon}`);
 
     return {
-        title: embed.title || '',
-        description: embed.description || '',
-        appearance: appearance.join('\n'), // Склеиваем переносом строки для корректного парсинга
+        title: data.title || '',
+        description: data.description || '',
+        appearance: appearance.join('\n'),
         media: media.join('\n'),
         meta: meta.join('\n'),
     };
@@ -1003,7 +1010,7 @@ function validateHttpUrl(value) {
 
 function shouldUseTimestamp(value) {
     if (!value) {
-        return false; // Раньше тут было true. Теперь по умолчанию время выключено.
+        return false;
     }
 
     return ['yes', 'true', '1', 'on'].includes(value.trim().toLowerCase());
