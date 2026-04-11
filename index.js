@@ -19,15 +19,29 @@ const {
     saveApplication,
     patchApplication,
 } = require('./storage/applicationsStore');
+const {
+    ensureCourtStoreFile,
+    getCourt,
+    saveCourt,
+    patchCourt,
+} = require('./storage/courtsStore');
 
 const PORT = Number(process.env.PORT) || 10000;
 const APPLICATION_MODAL_ID = 'minecraft_application_modal';
+const COURT_MODAL_ID = 'minecraft_court_modal';
 const EMBED_MODAL_PREFIX = 'create_embed_modal';
 const OPEN_APPLICATION_BUTTON_ID = 'open_application_modal';
+const OPEN_COURT_BUTTON_ID = 'open_court_modal';
 const APPROVE_APPLICATION_PREFIX = 'approve_application_';
 const REJECT_APPLICATION_PREFIX = 'reject_application_';
+const APPROVE_COURT_PREFIX = 'approve_court_';
+const REJECT_COURT_PREFIX = 'reject_court_';
 const APPLICATION_COMMAND_NAMES = new Set(['анкета', 'заявка']);
 const EMBED_COMMAND_NAME = 'embed';
+const DEFAULT_COURT_PANEL_CHANNEL_ID = '1492315531922112604';
+const DEFAULT_COURT_REVIEW_CHANNEL_ID = '1492316013264375968';
+const APPLICATION_RESUBMISSION_LIMIT = 3;
+const APPLICATION_RESUBMISSION_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 const REQUIRED_ENV_VARS = [
     'TOKEN',
     'CLIENT_ID',
@@ -40,6 +54,7 @@ const REQUIRED_ENV_VARS = [
 
 validateEnvironment();
 ensureStoreFile();
+ensureCourtStoreFile();
 
 const app = express();
 const client = new Client({
@@ -65,6 +80,18 @@ client.once(Events.ClientReady, async (readyClient) => {
         await ensureApplicationPanel();
     } catch (error) {
         console.error('Не удалось проверить или отправить панель заявок:', error);
+    }
+
+    try {
+        await ensureCourtPanel();
+    } catch (error) {
+        console.error('Не удалось проверить или отправить панель судов:', error);
+    }
+
+    try {
+        await synchronizeClosedModerationMessages();
+    } catch (error) {
+        console.error('Не удалось синхронизировать уже обработанные модераторские сообщения:', error);
     }
 });
 
@@ -108,6 +135,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 return;
             }
 
+            if (interaction.customId === OPEN_COURT_BUTTON_ID) {
+                await handleCourtOpen(interaction);
+                return;
+            }
+
             if (interaction.customId.startsWith(APPROVE_APPLICATION_PREFIX)) {
                 await handleApprove(interaction);
                 return;
@@ -117,11 +149,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 await handleReject(interaction);
                 return;
             }
+
+            if (interaction.customId.startsWith(APPROVE_COURT_PREFIX)) {
+                await handleCourtApprove(interaction);
+                return;
+            }
+
+            if (interaction.customId.startsWith(REJECT_COURT_PREFIX)) {
+                await handleCourtReject(interaction);
+                return;
+            }
         }
 
         if (interaction.isModalSubmit()) {
             if (interaction.customId === APPLICATION_MODAL_ID) {
                 await handleApplicationSubmit(interaction);
+                return;
+            }
+
+            if (interaction.customId === COURT_MODAL_ID) {
+                await handleCourtSubmit(interaction);
                 return;
             }
 
@@ -191,6 +238,53 @@ function buildApplicationModal() {
         new ActionRowBuilder().addComponents(ageInput),
         new ActionRowBuilder().addComponents(aboutInput),
         new ActionRowBuilder().addComponents(extraInput),
+    );
+
+    return modal;
+}
+
+function buildCourtModal() {
+    const modal = new ModalBuilder()
+        .setCustomId(COURT_MODAL_ID)
+        .setTitle('Подача иска в суд');
+
+    const plaintiffInput = new TextInputBuilder()
+        .setCustomId('plaintiff_nickname')
+        .setLabel('Ваш ник в Minecraft')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(32)
+        .setPlaceholder('Например: Steve');
+
+    const defendantInput = new TextInputBuilder()
+        .setCustomId('defendant_nickname')
+        .setLabel('Ник обвиняемого')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(32)
+        .setPlaceholder('Например: Griefer123');
+
+    const reasonInput = new TextInputBuilder()
+        .setCustomId('court_reason')
+        .setLabel('Причина обращения')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+        .setMaxLength(1000)
+        .setPlaceholder('Опишите, что произошло, в чем обвинение и какие у вас есть доказательства.');
+
+    const scheduleInput = new TextInputBuilder()
+        .setCustomId('court_schedule')
+        .setLabel('Желаемая дата и время суда')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(100)
+        .setPlaceholder('Например: 14.04 в 19:00 по МСК');
+
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(plaintiffInput),
+        new ActionRowBuilder().addComponents(defendantInput),
+        new ActionRowBuilder().addComponents(reasonInput),
+        new ActionRowBuilder().addComponents(scheduleInput),
     );
 
     return modal;
@@ -320,9 +414,10 @@ function buildApplicationPanelEmbed() {
         'Наш сервер является приватным, и мы внимательно отбираем игроков, чтобы сохранить дружелюбную и спокойную атмосферу.',
         '',
         '**⚠️ Важные моменты**',
-        '> 1. Повторная подача заявки отключена.',
-        '> 2. Не пишите администрации по статусу заявки до решения.',
-        '> 3. Развернутые ответы повышают шанс одобрения.',
+        '> 1. Если анкету отклонят, повторно подать ее можно через 12 часов.',
+        '> 2. Максимум доступно 3 повторные подачи после первого отказа.',
+        '> 3. Не пишите администрации по статусу заявки до решения.',
+        '> 4. Развернутые ответы повышают шанс одобрения.',
     ];
 
     if (shopChannelMention) {
@@ -380,12 +475,101 @@ function buildApplicationPanelComponents() {
     ];
 }
 
+function buildCourtEmbed(userId, caseId, formData) {
+    return new EmbedBuilder()
+        .setTitle('Новая заявка в суд')
+        .setColor(0xF1C40F)
+        .addFields(
+            {
+                name: 'Истец (Discord)',
+                value: `<@${userId}>`,
+            },
+            {
+                name: 'Ваш ник в Minecraft',
+                value: formData.plaintiffNickname,
+            },
+            {
+                name: 'Ник обвиняемого',
+                value: formData.defendantNickname,
+            },
+            {
+                name: 'Причина',
+                value: formData.reason,
+            },
+            {
+                name: 'Желаемая дата и время суда',
+                value: formData.schedule,
+            },
+            {
+                name: 'Номер дела',
+                value: `#${caseId}`,
+            },
+            {
+                name: 'Статус',
+                value: 'На рассмотрении',
+            },
+        )
+        .setTimestamp();
+}
+
+function buildCourtModerationButtons(caseId) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`${APPROVE_COURT_PREFIX}${caseId}`)
+            .setLabel('Принять')
+            .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId(`${REJECT_COURT_PREFIX}${caseId}`)
+            .setLabel('Отклонить')
+            .setStyle(ButtonStyle.Danger),
+    );
+}
+
+function buildCourtPanelEmbed() {
+    const descriptionParts = [
+        'Если на сервере случился конфликт, спор или нарушение, и вы хотите решения судьи, соберите доказательства и подайте обращение в суд.',
+        '',
+        '**Что указать в заявке**',
+        '> 1. Ваш ник в Minecraft.',
+        '> 2. Ник обвиняемого.',
+        '> 3. Подробную причину обращения и суть обвинения.',
+        '> 4. Желаемую дату и время проведения суда.',
+        '',
+        '**Важно**',
+        '> Чем подробнее описание и чем лучше доказательства, тем быстрее администрации будет принять решение.',
+    ];
+
+    return new EmbedBuilder()
+        .setTitle('⚖️ Подать обращение в суд')
+        .setDescription(descriptionParts.join('\n'))
+        .setColor(0xF1C40F)
+        .setFooter({
+            text: 'EVOSMP | Судебная система',
+        });
+}
+
+function buildCourtPanelComponents() {
+    return [
+        new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(OPEN_COURT_BUTTON_ID)
+                .setLabel('Подать в суд')
+                .setStyle(ButtonStyle.Primary),
+        ),
+    ];
+}
+
 async function ensureApplicationPanel() {
     const panelChannel = await client.channels.fetch(process.env.PANEL_CHANNEL_ID);
 
     if (!panelChannel || !panelChannel.isTextBased() || !('messages' in panelChannel)) {
         throw new Error('PANEL_CHANNEL_ID не указывает на текстовый канал.');
     }
+
+    const panelPayload = {
+        embeds: [buildApplicationPanelEmbed()],
+        components: buildApplicationPanelComponents(),
+    };
 
     const recentMessages = await panelChannel.messages.fetch({ limit: 100 });
     const existingPanel = recentMessages.find((message) =>
@@ -396,17 +580,41 @@ async function ensureApplicationPanel() {
     );
 
     if (existingPanel) {
+        await existingPanel.edit(panelPayload).catch(() => {});
         return;
     }
-
-    const panelPayload = {
-        embeds: [buildApplicationPanelEmbed()],
-        components: buildApplicationPanelComponents(),
-    };
 
     await panelChannel.send({
         ...panelPayload,
     });
+}
+
+async function ensureCourtPanel() {
+    const panelChannel = await client.channels.fetch(getCourtPanelChannelId());
+
+    if (!panelChannel || !panelChannel.isTextBased() || !('messages' in panelChannel)) {
+        throw new Error('COURT_PANEL_CHANNEL_ID не указывает на текстовый канал.');
+    }
+
+    const panelPayload = {
+        embeds: [buildCourtPanelEmbed()],
+        components: buildCourtPanelComponents(),
+    };
+
+    const recentMessages = await panelChannel.messages.fetch({ limit: 100 });
+    const existingPanel = recentMessages.find((message) =>
+        message.author.id === client.user.id &&
+        message.components.some((row) =>
+            row.components.some((component) => component.customId === OPEN_COURT_BUTTON_ID),
+        ),
+    );
+
+    if (existingPanel) {
+        await existingPanel.edit(panelPayload).catch(() => {});
+        return;
+    }
+
+    await panelChannel.send(panelPayload);
 }
 
 async function handleApplicationOpen(interaction) {
@@ -418,6 +626,10 @@ async function handleApplicationOpen(interaction) {
     }
 
     await interaction.showModal(buildApplicationModal());
+}
+
+async function handleCourtOpen(interaction) {
+    await interaction.showModal(buildCourtModal());
 }
 
 async function handleEmbedCommand(interaction) {
@@ -507,8 +719,17 @@ async function handleApplicationSubmit(interaction) {
     });
 
     const now = new Date().toISOString();
+    const existingApplication = getApplication(interaction.user.id);
+    const isResubmission = existingApplication?.status === 'rejected';
+    const submissionCount = isResubmission
+        ? getApplicationSubmissionCount(existingApplication) + 1
+        : 1;
+    const resubmissionCount = isResubmission
+        ? getApplicationResubmissionCount(existingApplication) + 1
+        : 0;
 
     saveApplication({
+        ...existingApplication,
         userId: interaction.user.id,
         guildId: interaction.guildId,
         applicationChannelId: applicationChannel.id,
@@ -520,16 +741,19 @@ async function handleApplicationSubmit(interaction) {
         age: formData.age,
         about: formData.about,
         extra: formData.extra,
+        submissionCount,
+        resubmissionCount,
+        reviewedAt: null,
+        rejectedAt: null,
+        nextSubmissionAt: null,
+        moderatorId: null,
+        moderatorTag: null,
     });
 
-    try {
-        await hidePanelForUser(interaction.user.id);
-    } catch (error) {
-        console.error('Не удалось скрыть панель заявок для пользователя:', error);
-    }
-
     await interaction.reply({
-        content: 'Ваша заявка отправлена администрации. Повторная подача отключена.',
+        content: isResubmission
+            ? `Ваша повторная анкета отправлена администрации. Если ее снова отклонят, после этой попытки останется повторных подач: ${Math.max(APPLICATION_RESUBMISSION_LIMIT - resubmissionCount, 0)}.`
+            : 'Ваша заявка отправлена администрации. Если ее отклонят, повторно подать анкету можно будет через 12 часов.',
         ephemeral: true,
     });
 }
@@ -545,9 +769,12 @@ async function handleApprove(interaction) {
     const moderationBlockMessage = getModerationBlockMessage(application.status);
 
     if (moderationBlockMessage) {
+        await syncApplicationMessageIfNeeded(interaction, application);
         await replyEphemeral(interaction, moderationBlockMessage);
         return;
     }
+
+    await interaction.deferUpdate();
 
     patchApplication(userId, {
         status: 'approving',
@@ -588,19 +815,22 @@ async function handleApprove(interaction) {
         console.log('Не удалось отправить сообщение пользователю в личные сообщения.');
     }
 
-    patchApplication(userId, {
+    const updatedApplication = patchApplication(userId, {
         status: 'approved',
         reviewedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
+        rejectedAt: null,
+        nextSubmissionAt: null,
         moderatorId: interaction.user.id,
         moderatorTag: interaction.user.tag,
     });
 
-    await updateApplicationMessage(
-        interaction,
+    await updateStatusMessage(
+        interaction.message,
         0x57F287,
-        `Одобрено администратором <@${interaction.user.id}>`,
+        buildApplicationApprovedStatusText(updatedApplication),
     );
+    await replyEphemeral(interaction, 'Заявка одобрена.');
 }
 
 async function handleReject(interaction) {
@@ -614,9 +844,12 @@ async function handleReject(interaction) {
     const moderationBlockMessage = getModerationBlockMessage(application.status);
 
     if (moderationBlockMessage) {
+        await syncApplicationMessageIfNeeded(interaction, application);
         await replyEphemeral(interaction, moderationBlockMessage);
         return;
     }
+
+    await interaction.deferUpdate();
 
     patchApplication(userId, {
         status: 'rejecting',
@@ -625,31 +858,166 @@ async function handleReject(interaction) {
         moderatorTag: interaction.user.tag,
     });
 
-    const member = await interaction.guild.members.fetch(userId).catch(() => null);
+    const rejectedAt = new Date();
+    const nextSubmissionAt = new Date(rejectedAt.getTime() + APPLICATION_RESUBMISSION_COOLDOWN_MS).toISOString();
+    const updatedApplication = patchApplication(userId, {
+        status: 'rejected',
+        reviewedAt: rejectedAt.toISOString(),
+        updatedAt: rejectedAt.toISOString(),
+        rejectedAt: rejectedAt.toISOString(),
+        nextSubmissionAt,
+        moderatorId: interaction.user.id,
+        moderatorTag: interaction.user.tag,
+    });
 
-    if (member) {
+    try {
+        await showPanelForUser(userId);
+    } catch (error) {
+        console.error('Не удалось вернуть пользователю доступ к панели заявок:', error);
+    }
+
+    const user = await client.users.fetch(userId).catch(() => null);
+
+    if (user) {
         try {
-            await member.send('Ваша заявка была отклонена. Вы были забанены на сервере.');
+            await user.send(buildApplicationRejectedDirectMessage(updatedApplication));
         } catch (error) {
             console.log('Не удалось отправить сообщение пользователю в личные сообщения.');
         }
     }
 
-    try {
-        await interaction.guild.members.ban(userId, {
-            reason: `Заявка отклонена администратором ${interaction.user.tag}`,
-        });
-    } catch (error) {
-        patchApplication(userId, {
-            status: 'pending',
-            updatedAt: new Date().toISOString(),
-        });
-        console.error('Ошибка при бане пользователя:', error);
-        await replyEphemeral(interaction, 'Не удалось забанить пользователя. Проверь права бота и позицию роли.');
+    await updateStatusMessage(
+        interaction.message,
+        0xED4245,
+        buildApplicationRejectedStatusText(updatedApplication),
+    );
+    await replyEphemeral(interaction, 'Заявка отклонена. Пользователь сможет подать повторную анкету через 12 часов.');
+}
+
+async function handleCourtSubmit(interaction) {
+    const formData = {
+        plaintiffNickname: interaction.fields.getTextInputValue('plaintiff_nickname').trim(),
+        defendantNickname: interaction.fields.getTextInputValue('defendant_nickname').trim(),
+        reason: interaction.fields.getTextInputValue('court_reason').trim(),
+        schedule: interaction.fields.getTextInputValue('court_schedule').trim(),
+    };
+
+    const reviewChannel = await client.channels.fetch(getCourtReviewChannelId()).catch(() => null);
+
+    if (!reviewChannel || !reviewChannel.isTextBased() || !('send' in reviewChannel)) {
+        await replyEphemeral(interaction, 'Не найден текстовый канал для отправки судебных заявок. Проверь настройки бота.');
         return;
     }
 
-    patchApplication(userId, {
+    const caseId = createCourtCaseId();
+    const reviewMessage = await reviewChannel.send({
+        embeds: [buildCourtEmbed(interaction.user.id, caseId, formData)],
+        components: [buildCourtModerationButtons(caseId)],
+    });
+
+    const now = new Date().toISOString();
+    saveCourt({
+        caseId,
+        userId: interaction.user.id,
+        guildId: interaction.guildId,
+        reviewChannelId: reviewChannel.id,
+        reviewMessageId: reviewMessage.id,
+        status: 'pending',
+        submittedAt: now,
+        updatedAt: now,
+        plaintiffNickname: formData.plaintiffNickname,
+        defendantNickname: formData.defendantNickname,
+        reason: formData.reason,
+        schedule: formData.schedule,
+    });
+
+    await interaction.reply({
+        content: 'Ваше обращение в суд отправлено администрации. Если потребуется, с вами свяжутся для уточнения деталей.',
+        ephemeral: true,
+    });
+}
+
+async function handleCourtApprove(interaction) {
+    if (!hasStaffRole(interaction)) {
+        await replyEphemeral(interaction, 'У вас нет прав для принятия судебных заявок.');
+        return;
+    }
+
+    const caseId = interaction.customId.slice(APPROVE_COURT_PREFIX.length);
+    const court = ensureCourtRecordFromMessage(interaction, caseId);
+    const moderationBlockMessage = getCourtModerationBlockMessage(court.status);
+
+    if (moderationBlockMessage) {
+        await syncCourtMessageIfNeeded(interaction, court);
+        await replyEphemeral(interaction, moderationBlockMessage);
+        return;
+    }
+
+    await interaction.deferUpdate();
+
+    patchCourt(caseId, {
+        status: 'approving',
+        updatedAt: new Date().toISOString(),
+        moderatorId: interaction.user.id,
+        moderatorTag: interaction.user.tag,
+    });
+
+    const updatedCourt = patchCourt(caseId, {
+        status: 'approved',
+        reviewedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        moderatorId: interaction.user.id,
+        moderatorTag: interaction.user.tag,
+    });
+
+    const user = updatedCourt?.userId
+        ? await client.users.fetch(updatedCourt.userId).catch(() => null)
+        : null;
+
+    if (user) {
+        try {
+            await user.send(
+                `Ваше обращение в суд принято администратором <@${interaction.user.id}>. Ожидайте дальнейшей информации по делу #${updatedCourt.caseId}.`,
+            );
+        } catch (error) {
+            console.log('Не удалось отправить сообщение пользователю в личные сообщения.');
+        }
+    }
+
+    await updateStatusMessage(
+        interaction.message,
+        0x57F287,
+        buildCourtApprovedStatusText(updatedCourt),
+    );
+    await replyEphemeral(interaction, 'Судебная заявка принята.');
+}
+
+async function handleCourtReject(interaction) {
+    if (!hasStaffRole(interaction)) {
+        await replyEphemeral(interaction, 'У вас нет прав для отклонения судебных заявок.');
+        return;
+    }
+
+    const caseId = interaction.customId.slice(REJECT_COURT_PREFIX.length);
+    const court = ensureCourtRecordFromMessage(interaction, caseId);
+    const moderationBlockMessage = getCourtModerationBlockMessage(court.status);
+
+    if (moderationBlockMessage) {
+        await syncCourtMessageIfNeeded(interaction, court);
+        await replyEphemeral(interaction, moderationBlockMessage);
+        return;
+    }
+
+    await interaction.deferUpdate();
+
+    patchCourt(caseId, {
+        status: 'rejecting',
+        updatedAt: new Date().toISOString(),
+        moderatorId: interaction.user.id,
+        moderatorTag: interaction.user.tag,
+    });
+
+    const updatedCourt = patchCourt(caseId, {
         status: 'rejected',
         reviewedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -657,11 +1025,26 @@ async function handleReject(interaction) {
         moderatorTag: interaction.user.tag,
     });
 
-    await updateApplicationMessage(
-        interaction,
+    const user = updatedCourt?.userId
+        ? await client.users.fetch(updatedCourt.userId).catch(() => null)
+        : null;
+
+    if (user) {
+        try {
+            await user.send(
+                `Ваше обращение в суд было отклонено администратором <@${interaction.user.id}>. При необходимости вы можете подать новую заявку позже.`,
+            );
+        } catch (error) {
+            console.log('Не удалось отправить сообщение пользователю в личные сообщения.');
+        }
+    }
+
+    await updateStatusMessage(
+        interaction.message,
         0xED4245,
-        `Отклонено администратором <@${interaction.user.id}>. Пользователь забанен.`,
+        buildCourtRejectedStatusText(updatedCourt),
     );
+    await replyEphemeral(interaction, 'Судебная заявка отклонена.');
 }
 
 async function handleEmbedSubmit(interaction) {
@@ -847,12 +1230,38 @@ function ensureApplicationRecordFromMessage(interaction, userId) {
         status: 'pending',
         submittedAt: now,
         updatedAt: now,
+        submissionCount: 1,
+        resubmissionCount: 0,
         source: 'legacy-message',
     });
 }
 
-async function updateApplicationMessage(interaction, color, statusText) {
-    const originalEmbed = interaction.message.embeds[0];
+function ensureCourtRecordFromMessage(interaction, caseId) {
+    const existingCourt = getCourt(caseId);
+
+    if (existingCourt) {
+        return existingCourt;
+    }
+
+    const now = new Date(interaction.message.createdTimestamp || Date.now()).toISOString();
+    const applicantField = interaction.message.embeds[0]?.fields?.find((field) => field.name === 'Истец (Discord)');
+    const userIdMatch = applicantField?.value?.match(/\d{17,20}/);
+
+    return saveCourt({
+        caseId,
+        userId: userIdMatch ? userIdMatch[0] : null,
+        guildId: interaction.guildId,
+        reviewChannelId: interaction.channelId,
+        reviewMessageId: interaction.message.id,
+        status: 'pending',
+        submittedAt: now,
+        updatedAt: now,
+        source: 'legacy-message',
+    });
+}
+
+async function updateStatusMessage(message, color, statusText) {
+    const originalEmbed = message.embeds[0];
     const baseEmbed = originalEmbed ? EmbedBuilder.from(originalEmbed) : new EmbedBuilder();
     const remainingFields = (originalEmbed?.fields || []).filter((field) => field.name !== 'Статус');
 
@@ -864,7 +1273,7 @@ async function updateApplicationMessage(interaction, color, statusText) {
         },
     ]);
 
-    await interaction.update({
+    await message.edit({
         embeds: [baseEmbed],
         components: [],
     });
@@ -878,26 +1287,20 @@ async function getSubmissionBlockReason(interaction) {
     const existingApplication = getApplication(interaction.user.id);
 
     if (existingApplication) {
-        return getStoredApplicationBlockMessage(existingApplication.status);
+        return getStoredApplicationBlockMessage(existingApplication);
     }
 
     const legacyApplication = await hydrateLegacyApplicationFromChannel(interaction.user.id);
 
     if (legacyApplication) {
-        return getStoredApplicationBlockMessage(legacyApplication.status);
-    }
-
-    const panelAlreadyHidden = await isPanelHiddenForUser(interaction.user.id);
-
-    if (panelAlreadyHidden) {
-        return 'Вы уже отправляли заявку раньше. Повторная подача отключена.';
+        return getStoredApplicationBlockMessage(legacyApplication);
     }
 
     return null;
 }
 
-function getStoredApplicationBlockMessage(status) {
-    switch (status) {
+function getStoredApplicationBlockMessage(application) {
+    switch (application?.status) {
         case 'pending':
             return 'Ваша заявка уже отправлена и ждет решения администрации.';
         case 'approving':
@@ -906,9 +1309,9 @@ function getStoredApplicationBlockMessage(status) {
         case 'approved':
             return 'Ваша заявка уже была одобрена. Повторная подача не требуется.';
         case 'rejected':
-            return 'Ваша заявка уже была отклонена. Повторная подача отключена.';
+            return getRejectedApplicationBlockMessage(application);
         default:
-            return 'У вас уже есть заявка в системе. Повторная подача отключена.';
+            return 'У вас уже есть заявка в системе.';
     }
 }
 
@@ -924,6 +1327,330 @@ function getModerationBlockMessage(status) {
         default:
             return null;
     }
+}
+
+function getCourtModerationBlockMessage(status) {
+    switch (status) {
+        case 'approved':
+            return 'Эта судебная заявка уже была принята.';
+        case 'rejected':
+            return 'Эта судебная заявка уже была отклонена.';
+        case 'approving':
+        case 'rejecting':
+            return 'Эта судебная заявка уже обрабатывается другим модератором.';
+        default:
+            return null;
+    }
+}
+
+function getRejectedApplicationBlockMessage(application) {
+    const state = getApplicationResubmissionState(application);
+
+    if (state.remainingResubmissions <= 0) {
+        return `Ваша анкета отклонена. Лимит повторных подач исчерпан (${APPLICATION_RESUBMISSION_LIMIT} из ${APPLICATION_RESUBMISSION_LIMIT}).`;
+    }
+
+    if (state.canResubmitNow) {
+        return null;
+    }
+
+    const exactTime = formatDiscordTimestamp(state.nextSubmissionDate, 'F');
+    const relativeTime = formatDiscordTimestamp(state.nextSubmissionDate, 'R');
+    return `Ваша анкета отклонена. Вы можете подать повторную анкету ${exactTime} (${relativeTime}). Осталось повторных подач: ${state.remainingResubmissions}.`;
+}
+
+function getApplicationSubmissionCount(application) {
+    const submissionCount = Number(application?.submissionCount);
+
+    if (Number.isInteger(submissionCount) && submissionCount > 0) {
+        return submissionCount;
+    }
+
+    return application ? 1 : 0;
+}
+
+function getApplicationResubmissionCount(application) {
+    const resubmissionCount = Number(application?.resubmissionCount);
+
+    if (Number.isInteger(resubmissionCount) && resubmissionCount >= 0) {
+        return resubmissionCount;
+    }
+
+    return Math.max(getApplicationSubmissionCount(application) - 1, 0);
+}
+
+function getApplicationNextSubmissionDate(application) {
+    if (application?.nextSubmissionAt) {
+        const nextSubmissionDate = new Date(application.nextSubmissionAt);
+
+        if (!Number.isNaN(nextSubmissionDate.getTime())) {
+            return nextSubmissionDate;
+        }
+    }
+
+    const fallbackBase = application?.rejectedAt || application?.reviewedAt || application?.updatedAt;
+
+    if (!fallbackBase) {
+        return null;
+    }
+
+    const baseDate = new Date(fallbackBase);
+
+    if (Number.isNaN(baseDate.getTime())) {
+        return null;
+    }
+
+    return new Date(baseDate.getTime() + APPLICATION_RESUBMISSION_COOLDOWN_MS);
+}
+
+function getApplicationResubmissionState(application) {
+    const resubmissionCount = getApplicationResubmissionCount(application);
+    const remainingResubmissions = Math.max(APPLICATION_RESUBMISSION_LIMIT - resubmissionCount, 0);
+    const nextSubmissionDate = getApplicationNextSubmissionDate(application);
+    const canResubmitNow = Boolean(
+        remainingResubmissions > 0 &&
+        (!nextSubmissionDate || nextSubmissionDate.getTime() <= Date.now()),
+    );
+
+    return {
+        resubmissionCount,
+        remainingResubmissions,
+        nextSubmissionDate,
+        canResubmitNow,
+    };
+}
+
+function buildApplicationRejectedDirectMessage(application) {
+    const state = getApplicationResubmissionState(application);
+
+    if (state.remainingResubmissions <= 0) {
+        return `Ваша анкета была отклонена. Лимит повторных подач исчерпан (${APPLICATION_RESUBMISSION_LIMIT} из ${APPLICATION_RESUBMISSION_LIMIT}).`;
+    }
+
+    const exactTime = formatDiscordTimestamp(state.nextSubmissionDate, 'F');
+    const relativeTime = formatDiscordTimestamp(state.nextSubmissionDate, 'R');
+    return `Ваша анкета была отклонена. Повторную анкету можно подать ${exactTime} (${relativeTime}). Осталось повторных подач: ${state.remainingResubmissions}.`;
+}
+
+function buildApplicationRejectedStatusText(application) {
+    const moderatorText = application?.moderatorId
+        ? `администратором <@${application.moderatorId}>`
+        : 'администратором';
+    const state = getApplicationResubmissionState(application);
+
+    if (state.remainingResubmissions <= 0) {
+        return `Отклонено ${moderatorText}. Лимит повторных подач исчерпан.`;
+    }
+
+    if (state.canResubmitNow) {
+        return `Отклонено ${moderatorText}. Повторная подача уже доступна. Осталось повторных подач: ${state.remainingResubmissions}.`;
+    }
+
+    const relativeTime = formatDiscordTimestamp(state.nextSubmissionDate, 'R');
+    return `Отклонено ${moderatorText}. Повторная подача доступна ${relativeTime}. Осталось повторных подач: ${state.remainingResubmissions}.`;
+}
+
+function buildApplicationApprovedStatusText(application) {
+    return application?.moderatorId
+        ? `Одобрено администратором <@${application.moderatorId}>.`
+        : 'Одобрено администратором.';
+}
+
+function buildCourtApprovedStatusText(court) {
+    return court?.moderatorId
+        ? `Принято администратором <@${court.moderatorId}>.`
+        : 'Принято администратором.';
+}
+
+function buildCourtRejectedStatusText(court) {
+    return court?.moderatorId
+        ? `Отклонено администратором <@${court.moderatorId}>.`
+        : 'Отклонено администратором.';
+}
+
+async function synchronizeClosedModerationMessages() {
+    await synchronizeApplicationReviewMessages();
+    await synchronizeCourtReviewMessages();
+}
+
+async function synchronizeApplicationReviewMessages() {
+    const applicationChannel = await client.channels.fetch(process.env.APPLICATION_CHANNEL_ID).catch(() => null);
+
+    if (!applicationChannel || !applicationChannel.isTextBased() || !('messages' in applicationChannel)) {
+        return;
+    }
+
+    const recentMessages = await applicationChannel.messages.fetch({ limit: 100 }).catch(() => null);
+
+    if (!recentMessages) {
+        return;
+    }
+
+    for (const message of recentMessages.values()) {
+        if (message.author.id !== client.user.id || !message.components.length) {
+            continue;
+        }
+
+        const userId = extractApplicationUserId(message);
+
+        if (!userId) {
+            continue;
+        }
+
+        const application = getApplication(userId);
+
+        if (!application) {
+            continue;
+        }
+
+        await synchronizeApplicationMessage(message, application);
+    }
+}
+
+async function synchronizeCourtReviewMessages() {
+    const reviewChannel = await client.channels.fetch(getCourtReviewChannelId()).catch(() => null);
+
+    if (!reviewChannel || !reviewChannel.isTextBased() || !('messages' in reviewChannel)) {
+        return;
+    }
+
+    const recentMessages = await reviewChannel.messages.fetch({ limit: 100 }).catch(() => null);
+
+    if (!recentMessages) {
+        return;
+    }
+
+    for (const message of recentMessages.values()) {
+        if (message.author.id !== client.user.id || !message.components.length) {
+            continue;
+        }
+
+        const caseId = extractCourtCaseId(message);
+
+        if (!caseId) {
+            continue;
+        }
+
+        const court = getCourt(caseId);
+
+        if (!court) {
+            continue;
+        }
+
+        await synchronizeCourtMessage(message, court);
+    }
+}
+
+function extractApplicationUserId(message) {
+    for (const row of message.components) {
+        for (const component of row.components) {
+            if (component.customId?.startsWith(APPROVE_APPLICATION_PREFIX)) {
+                return component.customId.slice(APPROVE_APPLICATION_PREFIX.length);
+            }
+
+            if (component.customId?.startsWith(REJECT_APPLICATION_PREFIX)) {
+                return component.customId.slice(REJECT_APPLICATION_PREFIX.length);
+            }
+        }
+    }
+
+    return null;
+}
+
+function extractCourtCaseId(message) {
+    for (const row of message.components) {
+        for (const component of row.components) {
+            if (component.customId?.startsWith(APPROVE_COURT_PREFIX)) {
+                return component.customId.slice(APPROVE_COURT_PREFIX.length);
+            }
+
+            if (component.customId?.startsWith(REJECT_COURT_PREFIX)) {
+                return component.customId.slice(REJECT_COURT_PREFIX.length);
+            }
+        }
+    }
+
+    return null;
+}
+
+async function synchronizeApplicationMessage(message, application) {
+    if (application.status === 'approved') {
+        await updateStatusMessage(
+            message,
+            0x57F287,
+            buildApplicationApprovedStatusText(application),
+        ).catch(() => {});
+        return;
+    }
+
+    if (application.status === 'rejected') {
+        await updateStatusMessage(
+            message,
+            0xED4245,
+            buildApplicationRejectedStatusText(application),
+        ).catch(() => {});
+    }
+}
+
+async function synchronizeCourtMessage(message, court) {
+    if (court.status === 'approved') {
+        await updateStatusMessage(
+            message,
+            0x57F287,
+            buildCourtApprovedStatusText(court),
+        ).catch(() => {});
+        return;
+    }
+
+    if (court.status === 'rejected') {
+        await updateStatusMessage(
+            message,
+            0xED4245,
+            buildCourtRejectedStatusText(court),
+        ).catch(() => {});
+    }
+}
+
+async function syncApplicationMessageIfNeeded(interaction, application) {
+    if (!interaction.message.components.length) {
+        return;
+    }
+
+    await synchronizeApplicationMessage(interaction.message, application);
+}
+
+async function syncCourtMessageIfNeeded(interaction, court) {
+    if (!interaction.message.components.length) {
+        return;
+    }
+
+    await synchronizeCourtMessage(interaction.message, court);
+}
+
+function formatDiscordTimestamp(value, style = 'F') {
+    if (!value) {
+        return 'через 12 часов';
+    }
+
+    const date = value instanceof Date ? value : new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+        return 'через 12 часов';
+    }
+
+    return `<t:${Math.floor(date.getTime() / 1000)}:${style}>`;
+}
+
+function getCourtPanelChannelId() {
+    return process.env.COURT_PANEL_CHANNEL_ID || DEFAULT_COURT_PANEL_CHANNEL_ID;
+}
+
+function getCourtReviewChannelId() {
+    return process.env.COURT_REVIEW_CHANNEL_ID || DEFAULT_COURT_REVIEW_CHANNEL_ID;
+}
+
+function createCourtCaseId() {
+    return `${Date.now()}${Math.floor(Math.random() * 1000)}`.slice(-12);
 }
 
 function hasStaffRole(interaction) {
@@ -1052,33 +1779,24 @@ async function hydrateLegacyApplicationFromChannel(userId) {
         status: 'pending',
         submittedAt,
         updatedAt: submittedAt,
+        submissionCount: 1,
+        resubmissionCount: 0,
         source: 'legacy-channel-scan',
     });
 }
 
-async function isPanelHiddenForUser(userId) {
+async function showPanelForUser(userId) {
     const panelChannel = await client.channels.fetch(process.env.PANEL_CHANNEL_ID).catch(() => null);
-
-    if (!panelChannel || !('permissionOverwrites' in panelChannel)) {
-        return false;
-    }
-
-    const overwrite = panelChannel.permissionOverwrites.cache.get(userId);
-    return Boolean(overwrite && overwrite.deny.has('ViewChannel'));
-}
-
-async function hidePanelForUser(userId) {
-    const panelChannel = await client.channels.fetch(process.env.PANEL_CHANNEL_ID);
 
     if (!panelChannel || !('permissionOverwrites' in panelChannel)) {
         return;
     }
 
-    await panelChannel.permissionOverwrites.edit(userId, {
-        ViewChannel: false,
-        SendMessages: false,
-        ReadMessageHistory: false,
-    });
+    const overwrite = panelChannel.permissionOverwrites.cache.get(userId);
+
+    if (overwrite) {
+        await overwrite.delete().catch(() => {});
+    }
 }
 
 async function replyEphemeral(interaction, content) {
