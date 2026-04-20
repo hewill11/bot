@@ -25,11 +25,28 @@ const {
     saveCourt,
     patchCourt,
 } = require('./storage/courtsStore');
+const {
+    ensureEmbedDraftStoreFile,
+    getEmbedDraft,
+    saveEmbedDraft,
+    patchEmbedDraft,
+    deleteEmbedDraft,
+} = require('./storage/embedDraftsStore');
 
 const PORT = Number(process.env.PORT) || 10000;
 const APPLICATION_MODAL_ID = 'minecraft_application_modal';
 const COURT_MODAL_ID = 'minecraft_court_modal';
 const EMBED_MODAL_PREFIX = 'create_embed_modal';
+const EMBED_BUILDER_BUTTON_PREFIX = 'embed_builder_';
+const EMBED_BUILDER_MODAL_PREFIX = 'embed_builder_modal';
+const EMBED_BUILDER_EDIT_BASIC_BUTTON_ID = `${EMBED_BUILDER_BUTTON_PREFIX}basic`;
+const EMBED_BUILDER_EDIT_MEDIA_BUTTON_ID = `${EMBED_BUILDER_BUTTON_PREFIX}media`;
+const EMBED_BUILDER_EDIT_APPEARANCE_BUTTON_ID = `${EMBED_BUILDER_BUTTON_PREFIX}appearance`;
+const EMBED_BUILDER_EDIT_META_BUTTON_ID = `${EMBED_BUILDER_BUTTON_PREFIX}meta`;
+const EMBED_BUILDER_EDIT_TARGET_BUTTON_ID = `${EMBED_BUILDER_BUTTON_PREFIX}target`;
+const EMBED_BUILDER_PREVIEW_BUTTON_ID = `${EMBED_BUILDER_BUTTON_PREFIX}preview`;
+const EMBED_BUILDER_SEND_BUTTON_ID = `${EMBED_BUILDER_BUTTON_PREFIX}send`;
+const EMBED_BUILDER_RESET_BUTTON_ID = `${EMBED_BUILDER_BUTTON_PREFIX}reset`;
 const OPEN_APPLICATION_BUTTON_ID = 'open_application_modal';
 const OPEN_COURT_BUTTON_ID = 'open_court_modal';
 const APPROVE_APPLICATION_PREFIX = 'approve_application_';
@@ -55,6 +72,7 @@ const REQUIRED_ENV_VARS = [
 validateEnvironment();
 ensureStoreFile();
 ensureCourtStoreFile();
+ensureEmbedDraftStoreFile();
 
 const app = express();
 const client = new Client({
@@ -130,6 +148,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         if (interaction.isButton()) {
+            if (interaction.customId.startsWith(EMBED_BUILDER_BUTTON_PREFIX)) {
+                await handleEmbedBuilderButton(interaction);
+                return;
+            }
+
             if (interaction.customId === OPEN_APPLICATION_BUTTON_ID) {
                 await handleApplicationOpen(interaction);
                 return;
@@ -169,6 +192,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             if (interaction.customId === COURT_MODAL_ID) {
                 await handleCourtSubmit(interaction);
+                return;
+            }
+
+            if (interaction.customId.startsWith(`${EMBED_BUILDER_MODAL_PREFIX}:`)) {
+                await handleEmbedBuilderModalSubmit(interaction);
                 return;
             }
 
@@ -354,6 +382,206 @@ function buildCreateEmbedModal(channelId, messageId = null, existingData = {}) {
         new ActionRowBuilder().addComponents(appearanceInput),
         new ActionRowBuilder().addComponents(mediaInput),
         new ActionRowBuilder().addComponents(metaInput),
+    );
+
+    return modal;
+}
+
+function buildEmbedBuilderBasicModal(draft) {
+    const modal = new ModalBuilder()
+        .setCustomId(`${EMBED_BUILDER_MODAL_PREFIX}:basic`)
+        .setTitle('Embed: текст');
+
+    const titleInput = new TextInputBuilder()
+        .setCustomId('embed_title')
+        .setLabel('Заголовок')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(256)
+        .setPlaceholder('Например: Новости проекта');
+
+    setTextInputValue(titleInput, draft.title);
+
+    const descriptionInput = new TextInputBuilder()
+        .setCustomId('embed_description')
+        .setLabel('Описание')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false)
+        .setMaxLength(4000)
+        .setPlaceholder('Основной текст embed.');
+
+    setTextInputValue(descriptionInput, draft.description);
+
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(titleInput),
+        new ActionRowBuilder().addComponents(descriptionInput),
+    );
+
+    return modal;
+}
+
+function buildEmbedBuilderMediaModal(draft) {
+    const modal = new ModalBuilder()
+        .setCustomId(`${EMBED_BUILDER_MODAL_PREFIX}:media`)
+        .setTitle('Embed: картинки');
+
+    const imageInput = new TextInputBuilder()
+        .setCustomId('embed_image_url')
+        .setLabel('Image URL')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false)
+        .setMaxLength(1000)
+        .setPlaceholder('https://example.com/image.png');
+
+    setTextInputValue(imageInput, draft.imageUrl);
+
+    const thumbnailInput = new TextInputBuilder()
+        .setCustomId('embed_thumbnail_url')
+        .setLabel('Thumbnail URL')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false)
+        .setMaxLength(1000)
+        .setPlaceholder('https://example.com/thumbnail.png');
+
+    setTextInputValue(thumbnailInput, draft.thumbnailUrl);
+
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(imageInput),
+        new ActionRowBuilder().addComponents(thumbnailInput),
+    );
+
+    return modal;
+}
+
+function buildEmbedBuilderAppearanceModal(draft) {
+    const modal = new ModalBuilder()
+        .setCustomId(`${EMBED_BUILDER_MODAL_PREFIX}:appearance`)
+        .setTitle('Embed: внешний вид');
+
+    const colorInput = new TextInputBuilder()
+        .setCustomId('embed_color')
+        .setLabel('Цвет')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(7)
+        .setPlaceholder('#5865F2');
+
+    setTextInputValue(colorInput, draft.color);
+
+    const urlInput = new TextInputBuilder()
+        .setCustomId('embed_url')
+        .setLabel('Ссылка заголовка')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false)
+        .setMaxLength(1000)
+        .setPlaceholder('https://example.com');
+
+    setTextInputValue(urlInput, draft.url);
+
+    const timestampInput = new TextInputBuilder()
+        .setCustomId('embed_timestamp')
+        .setLabel('Timestamp')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(10)
+        .setPlaceholder('yes / no');
+
+    if (draft.timestamp) {
+        timestampInput.setValue('yes');
+    }
+
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(colorInput),
+        new ActionRowBuilder().addComponents(urlInput),
+        new ActionRowBuilder().addComponents(timestampInput),
+    );
+
+    return modal;
+}
+
+function buildEmbedBuilderMetaModal(draft) {
+    const modal = new ModalBuilder()
+        .setCustomId(`${EMBED_BUILDER_MODAL_PREFIX}:meta`)
+        .setTitle('Embed: автор и footer');
+
+    const authorInput = new TextInputBuilder()
+        .setCustomId('embed_author')
+        .setLabel('Автор')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(256)
+        .setPlaceholder('EVOSMP');
+
+    setTextInputValue(authorInput, draft.author);
+
+    const authorIconInput = new TextInputBuilder()
+        .setCustomId('embed_author_icon_url')
+        .setLabel('Иконка автора URL')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false)
+        .setMaxLength(1000)
+        .setPlaceholder('https://example.com/author.png');
+
+    setTextInputValue(authorIconInput, draft.authorIconUrl);
+
+    const footerInput = new TextInputBuilder()
+        .setCustomId('embed_footer')
+        .setLabel('Footer')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(2048)
+        .setPlaceholder('Администрация сервера');
+
+    setTextInputValue(footerInput, draft.footer);
+
+    const footerIconInput = new TextInputBuilder()
+        .setCustomId('embed_footer_icon_url')
+        .setLabel('Иконка footer URL')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false)
+        .setMaxLength(1000)
+        .setPlaceholder('https://example.com/footer.png');
+
+    setTextInputValue(footerIconInput, draft.footerIconUrl);
+
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(authorInput),
+        new ActionRowBuilder().addComponents(authorIconInput),
+        new ActionRowBuilder().addComponents(footerInput),
+        new ActionRowBuilder().addComponents(footerIconInput),
+    );
+
+    return modal;
+}
+
+function buildEmbedBuilderTargetModal(draft) {
+    const modal = new ModalBuilder()
+        .setCustomId(`${EMBED_BUILDER_MODAL_PREFIX}:target`)
+        .setTitle('Embed: канал');
+
+    const channelInput = new TextInputBuilder()
+        .setCustomId('embed_channel')
+        .setLabel('Канал ID, #упоминание или ссылка')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(200)
+        .setPlaceholder('123456789012345678 или ссылка на сообщение');
+
+    setTextInputValue(channelInput, draft.channelId);
+
+    const messageInput = new TextInputBuilder()
+        .setCustomId('embed_message_id')
+        .setLabel('ID/ссылка сообщения для редактирования')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(200)
+        .setPlaceholder('Оставьте пустым, чтобы отправить новое сообщение');
+
+    setTextInputValue(messageInput, draft.messageId);
+
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(channelInput),
+        new ActionRowBuilder().addComponents(messageInput),
     );
 
     return modal;
@@ -638,7 +866,8 @@ async function handleEmbedCommand(interaction) {
         return;
     }
 
-    const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
+    const selectedChannel = interaction.options.getChannel('channel');
+    let targetChannel = selectedChannel || interaction.channel;
     let messageId = interaction.options.getString('message_id');
 
     if (!targetChannel || !targetChannel.isTextBased() || !('send' in targetChannel)) {
@@ -646,10 +875,32 @@ async function handleEmbedCommand(interaction) {
         return;
     }
 
-    let existingData = {};
+    const shouldContinueDraft = !selectedChannel && !messageId;
+    const existingDraft = shouldContinueDraft ? getEmbedDraft(interaction.user.id) : null;
+
+    if (existingDraft) {
+        await interaction.reply({
+            ...buildEmbedBuilderPanelPayload(
+                existingDraft,
+                'Продолжаю ваш сохраненный черновик. Его можно закрывать и открывать снова через `/embed`.',
+            ),
+            ephemeral: true,
+        });
+        return;
+    }
+
+    let draftData = createEmptyEmbedDraftData();
 
     if (messageId) {
-        if (messageId.includes('/')) {
+        const messageTarget = parseDiscordMessageTarget(messageId, 'message');
+
+        if (!selectedChannel && messageTarget.channelId) {
+            targetChannel = await client.channels.fetch(messageTarget.channelId).catch(() => targetChannel);
+        }
+
+        if (messageTarget.messageId) {
+            messageId = messageTarget.messageId;
+        } else if (messageId.includes('/')) {
             messageId = messageId.split('/').pop().trim();
         } else {
             messageId = messageId.trim();
@@ -669,7 +920,7 @@ async function handleEmbedCommand(interaction) {
             }
 
             if (message.embeds.length > 0) {
-                existingData = deconstructEmbed(message.embeds[0]);
+                draftData = createEmbedDraftDataFromEmbed(message.embeds[0]);
             } else {
                 await replyEphemeral(interaction, 'В этом сообщении нет embed для редактирования.');
                 return;
@@ -681,7 +932,24 @@ async function handleEmbedCommand(interaction) {
         }
     }
 
-    await interaction.showModal(buildCreateEmbedModal(targetChannel.id, messageId, existingData));
+    const now = new Date().toISOString();
+    const draft = saveEmbedDraft({
+        ...draftData,
+        userId: interaction.user.id,
+        guildId: interaction.guildId,
+        channelId: targetChannel.id,
+        messageId: messageId || null,
+        createdAt: now,
+        updatedAt: now,
+    });
+
+    await interaction.reply({
+        ...buildEmbedBuilderPanelPayload(
+            draft,
+            'Черновик создан. Заполняйте его по частям, окно можно закрывать: данные сохраняются после каждой модалки.',
+        ),
+        ephemeral: true,
+    });
 }
 
 async function handleApplicationSubmit(interaction) {
@@ -1047,6 +1315,146 @@ async function handleCourtReject(interaction) {
     await replyEphemeral(interaction, 'Судебная заявка отклонена.');
 }
 
+async function handleEmbedBuilderButton(interaction) {
+    if (!hasStaffRole(interaction)) {
+        await replyEphemeral(interaction, 'У вас нет прав для работы с embed.');
+        return;
+    }
+
+    const draft = getEmbedDraft(interaction.user.id);
+
+    if (!draft) {
+        await replyEphemeral(interaction, 'Черновик не найден. Используйте `/embed`, чтобы создать новый.');
+        return;
+    }
+
+    switch (interaction.customId) {
+        case EMBED_BUILDER_EDIT_BASIC_BUTTON_ID:
+            await interaction.showModal(buildEmbedBuilderBasicModal(draft));
+            return;
+        case EMBED_BUILDER_EDIT_MEDIA_BUTTON_ID:
+            await interaction.showModal(buildEmbedBuilderMediaModal(draft));
+            return;
+        case EMBED_BUILDER_EDIT_APPEARANCE_BUTTON_ID:
+            await interaction.showModal(buildEmbedBuilderAppearanceModal(draft));
+            return;
+        case EMBED_BUILDER_EDIT_META_BUTTON_ID:
+            await interaction.showModal(buildEmbedBuilderMetaModal(draft));
+            return;
+        case EMBED_BUILDER_EDIT_TARGET_BUTTON_ID:
+            await interaction.showModal(buildEmbedBuilderTargetModal(draft));
+            return;
+        case EMBED_BUILDER_PREVIEW_BUTTON_ID:
+            await interaction.update(buildEmbedBuilderPanelPayload(draft, 'Предпросмотр обновлен.', true));
+            return;
+        case EMBED_BUILDER_SEND_BUTTON_ID:
+            await sendEmbedDraft(interaction, draft);
+            return;
+        case EMBED_BUILDER_RESET_BUTTON_ID:
+            deleteEmbedDraft(interaction.user.id);
+            await interaction.update({
+                content: 'Черновик embed сброшен.',
+                embeds: [],
+                components: [],
+            });
+            return;
+        default:
+            await replyEphemeral(interaction, 'Неизвестное действие конструктора embed.');
+    }
+}
+
+async function handleEmbedBuilderModalSubmit(interaction) {
+    if (!hasStaffRole(interaction)) {
+        await replyEphemeral(interaction, 'У вас нет прав для работы с embed.');
+        return;
+    }
+
+    const draft = getEmbedDraft(interaction.user.id);
+
+    if (!draft) {
+        await replyEphemeral(interaction, 'Черновик не найден. Используйте `/embed`, чтобы создать новый.');
+        return;
+    }
+
+    const section = interaction.customId.split(':')[1];
+    const updates = parseEmbedBuilderModalUpdates(interaction, draft, section);
+
+    if (updates.error) {
+        await replyEphemeral(interaction, updates.error);
+        return;
+    }
+
+    const updatedDraft = patchEmbedDraft(interaction.user.id, updates.values);
+
+    await interaction.reply({
+        ...buildEmbedBuilderPanelPayload(updatedDraft, 'Черновик сохранен.', true),
+        ephemeral: true,
+    });
+}
+
+async function sendEmbedDraft(interaction, draft) {
+    const built = buildEmbedFromDraft(draft);
+
+    if (built.errors.length) {
+        await interaction.update(buildEmbedBuilderPanelPayload(
+            draft,
+            `Не могу отправить embed:\n${built.errors.map((error) => `• ${error}`).join('\n')}`,
+            true,
+        ));
+        return;
+    }
+
+    const targetChannel = await client.channels.fetch(draft.channelId).catch(() => null);
+
+    if (!targetChannel || !targetChannel.isTextBased() || !('send' in targetChannel)) {
+        await interaction.update(buildEmbedBuilderPanelPayload(
+            draft,
+            'Не удалось найти канал назначения. Нажмите `Канал` и укажите канал заново.',
+            true,
+        ));
+        return;
+    }
+
+    try {
+        if (draft.messageId) {
+            const messageToEdit = await targetChannel.messages.fetch(draft.messageId);
+
+            if (messageToEdit.author.id !== client.user.id) {
+                await interaction.update(buildEmbedBuilderPanelPayload(
+                    draft,
+                    'Я могу редактировать только те сообщения, которые отправлял сам.',
+                    true,
+                ));
+                return;
+            }
+
+            await messageToEdit.edit({ embeds: [built.embed] });
+            deleteEmbedDraft(interaction.user.id);
+            await interaction.update({
+                content: `Embed успешно обновлен в канале <#${targetChannel.id}>. ID сообщения: \`${messageToEdit.id}\``,
+                embeds: [],
+                components: [],
+            });
+            return;
+        }
+
+        const sentMessage = await targetChannel.send({ embeds: [built.embed] });
+        deleteEmbedDraft(interaction.user.id);
+        await interaction.update({
+            content: `Embed отправлен в канал <#${targetChannel.id}>. ID сообщения: \`${sentMessage.id}\``,
+            embeds: [],
+            components: [],
+        });
+    } catch (error) {
+        console.error('Ошибка при отправке/редактировании embed из конструктора:', error);
+        await interaction.update(buildEmbedBuilderPanelPayload(
+            draft,
+            'Не удалось отправить или обновить embed. Проверьте права бота, канал и ID сообщения.',
+            true,
+        ));
+    }
+}
+
 async function handleEmbedSubmit(interaction) {
     if (!hasStaffRole(interaction)) {
         await replyEphemeral(interaction, 'У вас нет прав для работы с embed.');
@@ -1211,6 +1619,480 @@ function deconstructEmbed(embed) {
         media: media.join('\n'),
         meta: meta.join('\n'),
     };
+}
+
+function createEmptyEmbedDraftData() {
+    return {
+        title: '',
+        description: '',
+        color: '',
+        url: '',
+        timestamp: false,
+        imageUrl: '',
+        thumbnailUrl: '',
+        author: '',
+        authorIconUrl: '',
+        footer: '',
+        footerIconUrl: '',
+    };
+}
+
+function createEmbedDraftDataFromEmbed(embed) {
+    if (!embed) {
+        return createEmptyEmbedDraftData();
+    }
+
+    const data = embed.data || embed;
+    const authorIcon = data.author?.icon_url || data.author?.iconURL || '';
+    const footerIcon = data.footer?.icon_url || data.footer?.iconURL || '';
+
+    return {
+        title: data.title || '',
+        description: data.description || '',
+        color: data.color !== null && data.color !== undefined
+            ? `#${data.color.toString(16).padStart(6, '0')}`
+            : '',
+        url: data.url || '',
+        timestamp: Boolean(data.timestamp),
+        imageUrl: data.image?.url || '',
+        thumbnailUrl: data.thumbnail?.url || '',
+        author: data.author?.name || '',
+        authorIconUrl: authorIcon,
+        footer: data.footer?.text || '',
+        footerIconUrl: footerIcon,
+    };
+}
+
+function buildEmbedBuilderPanelPayload(draft, notice = null, includePreview = false) {
+    const built = buildEmbedFromDraft(draft);
+    const statusLines = [
+        'Черновик сохраняется после каждой модалки. Можно закрыть окно, сходить за ссылкой и открыть `/embed` снова.',
+        '',
+        `Канал: ${draft.channelId ? `<#${draft.channelId}>` : 'не выбран'}`,
+        `Режим: ${draft.messageId ? `редактирование сообщения \`${draft.messageId}\`` : 'новое сообщение'}`,
+        `Обновлен: ${draft.updatedAt ? formatDiscordTimestamp(draft.updatedAt, 'R') : 'только что'}`,
+    ];
+
+    const filledParts = [
+        draft.title ? 'заголовок' : null,
+        draft.description ? 'описание' : null,
+        draft.color ? 'цвет' : null,
+        draft.url ? 'ссылка заголовка' : null,
+        draft.imageUrl ? 'image' : null,
+        draft.thumbnailUrl ? 'thumbnail' : null,
+        draft.author ? 'автор' : null,
+        draft.footer ? 'footer' : null,
+        draft.timestamp ? 'timestamp' : null,
+    ].filter(Boolean);
+
+    const panelEmbed = new EmbedBuilder()
+        .setTitle('Конструктор embed')
+        .setDescription(statusLines.join('\n'))
+        .setColor(0x5865F2)
+        .addFields(
+            {
+                name: 'Заполнено',
+                value: filledParts.length ? filledParts.join(', ') : 'Пока ничего не заполнено.',
+            },
+            {
+                name: 'Картинки',
+                value: [
+                    `Image: ${draft.imageUrl ? truncateText(draft.imageUrl, 140) : 'не задано'}`,
+                    `Thumbnail: ${draft.thumbnailUrl ? truncateText(draft.thumbnailUrl, 140) : 'не задано'}`,
+                ].join('\n'),
+            },
+        );
+
+    const payload = {
+        embeds: [panelEmbed],
+        components: buildEmbedBuilderComponents(),
+    };
+
+    if (notice) {
+        payload.content = truncateText(notice, 1900);
+    }
+
+    if (includePreview) {
+        if (built.errors.length) {
+            panelEmbed.addFields({
+                name: 'Что нужно поправить',
+                value: truncateText(built.errors.map((error) => `• ${error}`).join('\n'), 1024),
+            });
+        } else {
+            payload.embeds.push(built.embed);
+        }
+    }
+
+    return payload;
+}
+
+function buildEmbedBuilderComponents() {
+    return [
+        new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(EMBED_BUILDER_EDIT_BASIC_BUTTON_ID)
+                .setLabel('Текст')
+                .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+                .setCustomId(EMBED_BUILDER_EDIT_MEDIA_BUTTON_ID)
+                .setLabel('Image/Thumbnail')
+                .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+                .setCustomId(EMBED_BUILDER_EDIT_APPEARANCE_BUTTON_ID)
+                .setLabel('Вид')
+                .setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder()
+                .setCustomId(EMBED_BUILDER_EDIT_META_BUTTON_ID)
+                .setLabel('Автор/Footer')
+                .setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder()
+                .setCustomId(EMBED_BUILDER_EDIT_TARGET_BUTTON_ID)
+                .setLabel('Канал')
+                .setStyle(ButtonStyle.Secondary),
+        ),
+        new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(EMBED_BUILDER_PREVIEW_BUTTON_ID)
+                .setLabel('Предпросмотр')
+                .setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder()
+                .setCustomId(EMBED_BUILDER_SEND_BUTTON_ID)
+                .setLabel('Отправить')
+                .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+                .setCustomId(EMBED_BUILDER_RESET_BUTTON_ID)
+                .setLabel('Сбросить')
+                .setStyle(ButtonStyle.Danger),
+        ),
+    ];
+}
+
+function parseEmbedBuilderModalUpdates(interaction, draft, section) {
+    switch (section) {
+        case 'basic':
+            return {
+                values: {
+                    title: normalizeOptionalText(interaction.fields.getTextInputValue('embed_title')) || '',
+                    description: normalizeOptionalText(interaction.fields.getTextInputValue('embed_description')) || '',
+                },
+            };
+        case 'media':
+            return parseEmbedBuilderMediaUpdates(interaction);
+        case 'appearance':
+            return parseEmbedBuilderAppearanceUpdates(interaction);
+        case 'meta':
+            return parseEmbedBuilderMetaUpdates(interaction);
+        case 'target':
+            return parseEmbedBuilderTargetUpdates(interaction, draft);
+        default:
+            return {
+                error: 'Неизвестный раздел конструктора embed.',
+            };
+    }
+}
+
+function parseEmbedBuilderMediaUpdates(interaction) {
+    const imageInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_image_url'));
+    const thumbnailInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_thumbnail_url'));
+    const imageUrl = validateOptionalUrlInput(imageInput, 'Image URL');
+    const thumbnailUrl = validateOptionalUrlInput(thumbnailInput, 'Thumbnail URL');
+
+    if (imageUrl.error) {
+        return imageUrl;
+    }
+
+    if (thumbnailUrl.error) {
+        return thumbnailUrl;
+    }
+
+    return {
+        values: {
+            imageUrl: imageUrl.value,
+            thumbnailUrl: thumbnailUrl.value,
+        },
+    };
+}
+
+function parseEmbedBuilderAppearanceUpdates(interaction) {
+    const colorInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_color'));
+    const urlInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_url'));
+    const timestampInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_timestamp'));
+    const color = normalizeEmbedColorInput(colorInput);
+    const url = validateOptionalUrlInput(urlInput, 'Ссылка заголовка');
+    const timestamp = parseTimestampInput(timestampInput);
+
+    if (colorInput && !color) {
+        return {
+            error: 'Цвет нужно указать в формате `#RRGGBB` или `RRGGBB`.',
+        };
+    }
+
+    if (url.error) {
+        return url;
+    }
+
+    if (timestamp === null) {
+        return {
+            error: 'Timestamp нужно указать как `yes`/`no`, `да`/`нет` или оставить пустым.',
+        };
+    }
+
+    return {
+        values: {
+            color,
+            url: url.value,
+            timestamp,
+        },
+    };
+}
+
+function parseEmbedBuilderMetaUpdates(interaction) {
+    const authorIconInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_author_icon_url'));
+    const footerIconInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_footer_icon_url'));
+    const authorIconUrl = validateOptionalUrlInput(authorIconInput, 'Иконка автора');
+    const footerIconUrl = validateOptionalUrlInput(footerIconInput, 'Иконка footer');
+
+    if (authorIconUrl.error) {
+        return authorIconUrl;
+    }
+
+    if (footerIconUrl.error) {
+        return footerIconUrl;
+    }
+
+    return {
+        values: {
+            author: normalizeOptionalText(interaction.fields.getTextInputValue('embed_author')) || '',
+            authorIconUrl: authorIconUrl.value,
+            footer: normalizeOptionalText(interaction.fields.getTextInputValue('embed_footer')) || '',
+            footerIconUrl: footerIconUrl.value,
+        },
+    };
+}
+
+function parseEmbedBuilderTargetUpdates(interaction, draft) {
+    const channelInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_channel'));
+    const messageInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_message_id'));
+    const channelTarget = parseDiscordMessageTarget(channelInput, 'channel');
+    const messageTarget = parseDiscordMessageTarget(messageInput, 'message');
+
+    if (!channelTarget.channelId) {
+        return {
+            error: 'Канал нужно указать как ID, #упоминание или ссылку Discord.',
+        };
+    }
+
+    if (messageInput && !messageTarget.messageId) {
+        return {
+            error: 'Сообщение для редактирования нужно указать как ID или ссылку Discord.',
+        };
+    }
+
+    return {
+        values: {
+            channelId: messageTarget.channelId || channelTarget.channelId || draft.channelId,
+            messageId: messageInput ? messageTarget.messageId : (channelTarget.messageId || null),
+        },
+    };
+}
+
+function buildEmbedFromDraft(draft) {
+    const errors = [];
+    const color = draft.color ? parseEmbedColor(draft.color) : null;
+    const embedUrl = validateOptionalUrlForBuild(draft.url, 'Ссылка заголовка', errors);
+    const imageUrl = validateOptionalUrlForBuild(draft.imageUrl, 'Image URL', errors);
+    const thumbnailUrl = validateOptionalUrlForBuild(draft.thumbnailUrl, 'Thumbnail URL', errors);
+    const authorIconUrl = validateOptionalUrlForBuild(draft.authorIconUrl, 'Иконка автора', errors);
+    const footerIconUrl = validateOptionalUrlForBuild(draft.footerIconUrl, 'Иконка footer', errors);
+
+    if (draft.color && color === null) {
+        errors.push('цвет должен быть в формате `#RRGGBB` или `RRGGBB`.');
+    }
+
+    if (!draft.title &&
+        !draft.description &&
+        !imageUrl &&
+        !thumbnailUrl &&
+        !draft.author &&
+        !draft.footer) {
+        errors.push('заполните хотя бы текст, картинку, автора или footer.');
+    }
+
+    if (errors.length) {
+        return {
+            embed: null,
+            errors,
+        };
+    }
+
+    const embed = new EmbedBuilder()
+        .setColor(color ?? 0x5865F2);
+
+    if (draft.title) {
+        embed.setTitle(draft.title);
+    }
+
+    if (draft.description) {
+        embed.setDescription(draft.description);
+    }
+
+    if (embedUrl) {
+        embed.setURL(embedUrl);
+    }
+
+    if (imageUrl) {
+        embed.setImage(imageUrl);
+    }
+
+    if (thumbnailUrl) {
+        embed.setThumbnail(thumbnailUrl);
+    }
+
+    if (draft.author) {
+        const authorOptions = { name: draft.author };
+
+        if (authorIconUrl) {
+            authorOptions.iconURL = authorIconUrl;
+        }
+
+        embed.setAuthor(authorOptions);
+    }
+
+    if (draft.footer) {
+        const footerOptions = { text: draft.footer };
+
+        if (footerIconUrl) {
+            footerOptions.iconURL = footerIconUrl;
+        }
+
+        embed.setFooter(footerOptions);
+    }
+
+    if (draft.timestamp) {
+        embed.setTimestamp();
+    }
+
+    return {
+        embed,
+        errors,
+    };
+}
+
+function validateOptionalUrlInput(value, fieldName) {
+    if (!value) {
+        return {
+            value: '',
+        };
+    }
+
+    const url = validateHttpUrl(value);
+
+    if (!url) {
+        return {
+            error: `${fieldName} должен быть полной ссылкой в формате \`http://\` или \`https://\`.`,
+        };
+    }
+
+    return {
+        value: url,
+    };
+}
+
+function validateOptionalUrlForBuild(value, fieldName, errors) {
+    if (!value) {
+        return null;
+    }
+
+    const url = validateHttpUrl(value);
+
+    if (!url) {
+        errors.push(`${fieldName} должен быть полной ссылкой в формате \`http://\` или \`https://\`.`);
+        return null;
+    }
+
+    return url;
+}
+
+function normalizeEmbedColorInput(value) {
+    if (!value) {
+        return '';
+    }
+
+    const color = parseEmbedColor(value);
+
+    if (color === null) {
+        return null;
+    }
+
+    return `#${color.toString(16).padStart(6, '0').toUpperCase()}`;
+}
+
+function parseTimestampInput(value) {
+    if (!value) {
+        return false;
+    }
+
+    const normalized = value.trim().toLowerCase();
+
+    if (['yes', 'true', '1', 'on', 'да'].includes(normalized)) {
+        return true;
+    }
+
+    if (['no', 'false', '0', 'off', 'нет'].includes(normalized)) {
+        return false;
+    }
+
+    return null;
+}
+
+function parseDiscordMessageTarget(value, mode = 'channel') {
+    if (!value) {
+        return {};
+    }
+
+    const trimmed = value.trim();
+    const messageLinkMatch = trimmed.match(/channels\/(?:\d{17,20}|@me)\/(\d{17,20})\/(\d{17,20})/);
+
+    if (messageLinkMatch) {
+        return {
+            channelId: messageLinkMatch[1],
+            messageId: messageLinkMatch[2],
+        };
+    }
+
+    const channelMentionMatch = trimmed.match(/^<#(\d{17,20})>$/);
+
+    if (channelMentionMatch) {
+        return {
+            channelId: channelMentionMatch[1],
+        };
+    }
+
+    const snowflakeMatch = trimmed.match(/\d{17,20}/);
+
+    if (snowflakeMatch) {
+        return mode === 'message'
+            ? { messageId: snowflakeMatch[0] }
+            : { channelId: snowflakeMatch[0] };
+    }
+
+    return {};
+}
+
+function setTextInputValue(input, value) {
+    if (value) {
+        input.setValue(String(value));
+    }
+}
+
+function truncateText(value, maxLength) {
+    const text = String(value || '');
+
+    if (text.length <= maxLength) {
+        return text;
+    }
+
+    return `${text.slice(0, Math.max(maxLength - 3, 0))}...`;
 }
 
 function ensureApplicationRecordFromMessage(interaction, userId) {
