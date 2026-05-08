@@ -9,6 +9,48 @@ const commands = [
         .setName('заявка')
         .setDescription('Открыть анкету на Minecraft сервер'),
     new SlashCommandBuilder()
+        .setName('ивент')
+        .setDescription('Создать панель регистрации на ивент')
+        .addChannelOption((option) =>
+            option
+                .setName('channel')
+                .setDescription('Канал для отправки панели ивента')
+                .setRequired(false),
+        )
+        .addStringOption((option) =>
+            option
+                .setName('title')
+                .setDescription('Название ивента или заголовок панели')
+                .setRequired(false),
+        )
+        .addStringOption((option) =>
+            option
+                .setName('description')
+                .setDescription('Дополнительное описание ивента')
+                .setRequired(false),
+        ),
+    new SlashCommandBuilder()
+        .setName('event')
+        .setDescription('Создать панель регистрации на ивент')
+        .addChannelOption((option) =>
+            option
+                .setName('channel')
+                .setDescription('Канал для отправки панели ивента')
+                .setRequired(false),
+        )
+        .addStringOption((option) =>
+            option
+                .setName('title')
+                .setDescription('Название ивента или заголовок панели')
+                .setRequired(false),
+        )
+        .addStringOption((option) =>
+            option
+                .setName('description')
+                .setDescription('Дополнительное описание ивента')
+                .setRequired(false),
+        ),
+    new SlashCommandBuilder()
         .setName('embed')
         .setDescription('Открыть конструктор embed с автосохранением черновика')
         .addChannelOption((option) =>

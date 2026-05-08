@@ -32,10 +32,18 @@ const {
     patchEmbedDraft,
     deleteEmbedDraft,
 } = require('./storage/embedDraftsStore');
+const {
+    ensureEventStoreFile,
+    getEvent,
+    saveEvent,
+    getEventRegistration,
+    saveEventRegistration,
+} = require('./storage/eventsStore');
 
 const PORT = Number(process.env.PORT) || 10000;
 const APPLICATION_MODAL_ID = 'minecraft_application_modal';
 const COURT_MODAL_ID = 'minecraft_court_modal';
+const EVENT_REGISTRATION_MODAL_PREFIX = 'event_registration_modal';
 const EMBED_MODAL_PREFIX = 'create_embed_modal';
 const EMBED_BUILDER_BUTTON_PREFIX = 'embed_builder_';
 const EMBED_BUILDER_MODAL_PREFIX = 'embed_builder_modal';
@@ -49,14 +57,17 @@ const EMBED_BUILDER_SEND_BUTTON_ID = `${EMBED_BUILDER_BUTTON_PREFIX}send`;
 const EMBED_BUILDER_RESET_BUTTON_ID = `${EMBED_BUILDER_BUTTON_PREFIX}reset`;
 const OPEN_APPLICATION_BUTTON_ID = 'open_application_modal';
 const OPEN_COURT_BUTTON_ID = 'open_court_modal';
+const OPEN_EVENT_REGISTRATION_PREFIX = 'open_event_registration_';
 const APPROVE_APPLICATION_PREFIX = 'approve_application_';
 const REJECT_APPLICATION_PREFIX = 'reject_application_';
 const APPROVE_COURT_PREFIX = 'approve_court_';
 const REJECT_COURT_PREFIX = 'reject_court_';
 const APPLICATION_COMMAND_NAMES = new Set(['анкета', 'заявка']);
+const EVENT_COMMAND_NAMES = new Set(['ивент', 'event']);
 const EMBED_COMMAND_NAME = 'embed';
 const DEFAULT_COURT_PANEL_CHANNEL_ID = '1492315531922112604';
 const DEFAULT_COURT_REVIEW_CHANNEL_ID = '1492316013264375968';
+const DEFAULT_EVENT_REGISTRATION_LOG_CHANNEL_ID = '1502223704023634041';
 const APPLICATION_RESUBMISSION_LIMIT = 3;
 const APPLICATION_RESUBMISSION_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 const REQUIRED_ENV_VARS = [
@@ -73,6 +84,7 @@ validateEnvironment();
 ensureStoreFile();
 ensureCourtStoreFile();
 ensureEmbedDraftStoreFile();
+ensureEventStoreFile();
 
 const app = express();
 const client = new Client({
@@ -141,10 +153,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 return;
             }
 
+            if (EVENT_COMMAND_NAMES.has(interaction.commandName)) {
+                await handleEventPanelCommand(interaction);
+                return;
+            }
+
             if (interaction.commandName === EMBED_COMMAND_NAME) {
                 await handleEmbedCommand(interaction);
+                return;
             }
-            return;
         }
 
         if (interaction.isButton()) {
@@ -160,6 +177,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             if (interaction.customId === OPEN_COURT_BUTTON_ID) {
                 await handleCourtOpen(interaction);
+                return;
+            }
+
+            if (interaction.customId.startsWith(OPEN_EVENT_REGISTRATION_PREFIX)) {
+                await handleEventRegistrationOpen(interaction);
                 return;
             }
 
@@ -192,6 +214,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             if (interaction.customId === COURT_MODAL_ID) {
                 await handleCourtSubmit(interaction);
+                return;
+            }
+
+            if (interaction.customId.startsWith(`${EVENT_REGISTRATION_MODAL_PREFIX}:`)) {
+                await handleEventRegistrationSubmit(interaction);
                 return;
             }
 
@@ -787,6 +814,80 @@ function buildCourtPanelComponents() {
     ];
 }
 
+function buildEventPanelEmbed(event) {
+    const descriptionParts = [
+        event.description || 'Если вы планируете быть на ивенте, нажмите кнопку ниже и укажите свой ник в Minecraft.',
+        '',
+        '> Бот сохранит вашу регистрацию и попытается автоматически поставить этот ник вам на Discord-сервере.',
+    ];
+
+    return new EmbedBuilder()
+        .setTitle(event.title || '🎉 Регистрация на ивент')
+        .setDescription(descriptionParts.join('\n'))
+        .setColor(0xF59E0B)
+        .setFooter({
+            text: 'EVOSMP | Ивенты',
+        });
+}
+
+function buildEventPanelComponents(eventId) {
+    return [
+        new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`${OPEN_EVENT_REGISTRATION_PREFIX}${eventId}`)
+                .setLabel('Я буду')
+                .setStyle(ButtonStyle.Success),
+        ),
+    ];
+}
+
+function buildEventRegistrationModal(event) {
+    const modal = new ModalBuilder()
+        .setCustomId(`${EVENT_REGISTRATION_MODAL_PREFIX}:${event.eventId}`)
+        .setTitle('Регистрация на ивент');
+
+    const nicknameInput = new TextInputBuilder()
+        .setCustomId('event_minecraft_nickname')
+        .setLabel('Ваш ник в Minecraft')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(32)
+        .setPlaceholder('Например: Steve');
+
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(nicknameInput),
+    );
+
+    return modal;
+}
+
+function buildEventRegistrationLogEmbed(event, registration) {
+    const jumpUrl = buildDiscordMessageUrl(event.guildId, event.channelId, event.messageId);
+
+    return new EmbedBuilder()
+        .setTitle('Новая регистрация на ивент')
+        .setColor(0x57F287)
+        .addFields(
+            {
+                name: 'Пользователь Discord',
+                value: `<@${registration.userId}>`,
+            },
+            {
+                name: 'Ник в Minecraft',
+                value: registration.nickname,
+            },
+            {
+                name: 'Ивент',
+                value: event.title || 'Регистрация на ивент',
+            },
+            {
+                name: 'Панель',
+                value: jumpUrl ? `[Открыть сообщение](${jumpUrl})` : 'Ссылка недоступна',
+            },
+        )
+        .setTimestamp();
+}
+
 async function ensureApplicationPanel() {
     const panelChannel = await client.channels.fetch(process.env.PANEL_CHANNEL_ID);
 
@@ -808,7 +909,9 @@ async function ensureApplicationPanel() {
     );
 
     if (existingPanel) {
-        await existingPanel.edit(panelPayload).catch(() => {});
+        if (messageNeedsUpdate(existingPanel, panelPayload)) {
+            await existingPanel.edit(panelPayload).catch(() => {});
+        }
         return;
     }
 
@@ -838,7 +941,9 @@ async function ensureCourtPanel() {
     );
 
     if (existingPanel) {
-        await existingPanel.edit(panelPayload).catch(() => {});
+        if (messageNeedsUpdate(existingPanel, panelPayload)) {
+            await existingPanel.edit(panelPayload).catch(() => {});
+        }
         return;
     }
 
@@ -858,6 +963,64 @@ async function handleApplicationOpen(interaction) {
 
 async function handleCourtOpen(interaction) {
     await interaction.showModal(buildCourtModal());
+}
+
+async function handleEventPanelCommand(interaction) {
+    if (!hasStaffRole(interaction)) {
+        await replyEphemeral(interaction, 'У вас нет прав для создания панели регистрации на ивент.');
+        return;
+    }
+
+    const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
+
+    if (!targetChannel || !targetChannel.isTextBased() || !('send' in targetChannel)) {
+        await replyEphemeral(interaction, 'Нужен текстовый канал, куда бот сможет отправить панель ивента.');
+        return;
+    }
+
+    const title = normalizeOptionalText(interaction.options.getString('title')) || '🎉 Регистрация на ивент';
+    const description = normalizeOptionalText(interaction.options.getString('description'));
+    const eventId = createEventId();
+    const now = new Date().toISOString();
+    const event = {
+        eventId,
+        guildId: interaction.guildId,
+        channelId: targetChannel.id,
+        messageId: null,
+        title,
+        description,
+        createdById: interaction.user.id,
+        createdByTag: interaction.user.tag,
+        createdAt: now,
+        updatedAt: now,
+    };
+
+    const panelMessage = await targetChannel.send({
+        embeds: [buildEventPanelEmbed(event)],
+        components: buildEventPanelComponents(eventId),
+    });
+
+    saveEvent({
+        ...event,
+        messageId: panelMessage.id,
+    });
+
+    await interaction.reply({
+        content: `Панель регистрации на ивент отправлена в канал <#${targetChannel.id}>. ID сообщения: \`${panelMessage.id}\``,
+        ephemeral: true,
+    });
+}
+
+async function handleEventRegistrationOpen(interaction) {
+    const eventId = interaction.customId.slice(OPEN_EVENT_REGISTRATION_PREFIX.length);
+    const event = ensureEventRecordFromMessage(interaction, eventId);
+
+    if (getEventRegistration(eventId, interaction.user.id)) {
+        await replyEphemeral(interaction, 'Вы уже зарегистрированы на этот ивент.');
+        return;
+    }
+
+    await interaction.showModal(buildEventRegistrationModal(event));
 }
 
 async function handleEmbedCommand(interaction) {
@@ -1018,10 +1181,12 @@ async function handleApplicationSubmit(interaction) {
         moderatorTag: null,
     });
 
+    const nicknameUpdateResult = await trySetMemberNickname(interaction, formData.nickname);
+
     await interaction.reply({
-        content: isResubmission
+        content: `${isResubmission
             ? `Ваша повторная анкета отправлена администрации. Если ее снова отклонят, после этой попытки останется повторных подач: ${Math.max(APPLICATION_RESUBMISSION_LIMIT - resubmissionCount, 0)}.`
-            : 'Ваша заявка отправлена администрации. Если ее отклонят, повторно подать анкету можно будет через 12 часов.',
+            : 'Ваша заявка отправлена администрации. Если ее отклонят, повторно подать анкету можно будет через 12 часов.'}${buildNicknameUpdateNotice(nicknameUpdateResult)}`,
         ephemeral: true,
     });
 }
@@ -1201,6 +1366,47 @@ async function handleCourtSubmit(interaction) {
 
     await interaction.reply({
         content: 'Ваше обращение в суд отправлено администрации. Если потребуется, с вами свяжутся для уточнения деталей.',
+        ephemeral: true,
+    });
+}
+
+async function handleEventRegistrationSubmit(interaction) {
+    const eventId = interaction.customId.split(':')[1];
+    const event = getEvent(eventId);
+
+    if (!event) {
+        await replyEphemeral(interaction, 'Не удалось найти этот ивент. Возможно, панель устарела.');
+        return;
+    }
+
+    if (getEventRegistration(eventId, interaction.user.id)) {
+        await replyEphemeral(interaction, 'Вы уже зарегистрированы на этот ивент.');
+        return;
+    }
+
+    const nickname = interaction.fields.getTextInputValue('event_minecraft_nickname').trim();
+    const registeredAt = new Date().toISOString();
+    const registration = saveEventRegistration({
+        eventId,
+        userId: interaction.user.id,
+        guildId: interaction.guildId,
+        nickname,
+        registeredAt,
+    });
+
+    const nicknameUpdateResult = await trySetMemberNickname(interaction, nickname);
+    const logChannel = await client.channels.fetch(getEventRegistrationLogChannelId()).catch(() => null);
+
+    if (logChannel && logChannel.isTextBased() && ('send' in logChannel)) {
+        await logChannel.send({
+            embeds: [buildEventRegistrationLogEmbed(event, registration)],
+        }).catch((error) => {
+            console.error('Не удалось отправить лог регистрации на ивент:', error);
+        });
+    }
+
+    await interaction.reply({
+        content: `Вы зарегистрированы на ивент **${event.title || 'Регистрация на ивент'}**.${buildNicknameUpdateNotice(nicknameUpdateResult)}`,
         ephemeral: true,
     });
 }
@@ -2142,6 +2348,29 @@ function ensureCourtRecordFromMessage(interaction, caseId) {
     });
 }
 
+function ensureEventRecordFromMessage(interaction, eventId) {
+    const existingEvent = getEvent(eventId);
+
+    if (existingEvent) {
+        return existingEvent;
+    }
+
+    const now = new Date(interaction.message.createdTimestamp || Date.now()).toISOString();
+    const eventEmbed = interaction.message.embeds[0];
+
+    return saveEvent({
+        eventId,
+        guildId: interaction.guildId,
+        channelId: interaction.channelId,
+        messageId: interaction.message.id,
+        title: eventEmbed?.title || '🎉 Регистрация на ивент',
+        description: eventEmbed?.description || null,
+        createdAt: now,
+        updatedAt: now,
+        source: 'legacy-message',
+    });
+}
+
 async function updateStatusMessage(message, color, statusText) {
     const originalEmbed = message.embeds[0];
     const baseEmbed = originalEmbed ? EmbedBuilder.from(originalEmbed) : new EmbedBuilder();
@@ -2531,8 +2760,137 @@ function getCourtReviewChannelId() {
     return process.env.COURT_REVIEW_CHANNEL_ID || DEFAULT_COURT_REVIEW_CHANNEL_ID;
 }
 
+function getEventRegistrationLogChannelId() {
+    return process.env.EVENT_REGISTRATION_LOG_CHANNEL_ID || DEFAULT_EVENT_REGISTRATION_LOG_CHANNEL_ID;
+}
+
 function createCourtCaseId() {
     return `${Date.now()}${Math.floor(Math.random() * 1000)}`.slice(-12);
+}
+
+function createEventId() {
+    return `event_${Date.now()}${Math.floor(Math.random() * 1000)}`;
+}
+
+function buildDiscordMessageUrl(guildId, channelId, messageId) {
+    if (!guildId || !channelId || !messageId) {
+        return null;
+    }
+
+    return `https://discord.com/channels/${guildId}/${channelId}/${messageId}`;
+}
+
+async function trySetMemberNickname(interaction, nickname) {
+    if (!interaction.guild || !interaction.user || !nickname) {
+        return {
+            status: 'skipped',
+        };
+    }
+
+    const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+
+    if (!member) {
+        return {
+            status: 'member-not-found',
+        };
+    }
+
+    if ((member.nickname || member.user.username) === nickname) {
+        return {
+            status: 'unchanged',
+        };
+    }
+
+    if (!member.manageable) {
+        return {
+            status: 'not-manageable',
+        };
+    }
+
+    try {
+        await member.setNickname(nickname, `Minecraft nickname sync by ${client.user.tag}`);
+        return {
+            status: 'updated',
+        };
+    } catch (error) {
+        console.error('Не удалось автоматически сменить ник участнику:', error);
+        return {
+            status: 'failed',
+        };
+    }
+}
+
+function buildNicknameUpdateNotice(result) {
+    switch (result?.status) {
+        case 'not-manageable':
+        case 'failed':
+        case 'member-not-found':
+            return '\nАвтоматически сменить ник в Discord не удалось. Проверьте права бота и положение его роли.';
+        default:
+            return '';
+    }
+}
+
+function messageNeedsUpdate(message, payload) {
+    const currentSnapshot = JSON.stringify({
+        content: message.content || '',
+        embeds: (message.embeds || []).map((embed) => normalizeEmbedForComparison(embed)),
+        components: normalizeComponentsForComparison(message.components || []),
+    });
+    const nextSnapshot = JSON.stringify({
+        content: payload.content || '',
+        embeds: (payload.embeds || []).map((embed) => normalizeEmbedForComparison(embed)),
+        components: normalizeComponentsForComparison(payload.components || []),
+    });
+
+    return currentSnapshot !== nextSnapshot;
+}
+
+function normalizeEmbedForComparison(embedLike) {
+    const embed = embedLike?.toJSON ? embedLike.toJSON() : (embedLike?.data || embedLike || {});
+    const authorIconUrl = embed.author?.icon_url || embed.author?.iconURL || null;
+    const footerIconUrl = embed.footer?.icon_url || embed.footer?.iconURL || null;
+
+    return {
+        title: embed.title || null,
+        description: embed.description || null,
+        color: embed.color ?? null,
+        url: embed.url || null,
+        imageUrl: embed.image?.url || null,
+        thumbnailUrl: embed.thumbnail?.url || null,
+        author: embed.author
+            ? {
+                name: embed.author.name || null,
+                iconUrl: authorIconUrl,
+                url: embed.author.url || null,
+            }
+            : null,
+        footer: embed.footer
+            ? {
+                text: embed.footer.text || null,
+                iconUrl: footerIconUrl,
+            }
+            : null,
+        fields: (embed.fields || []).map((field) => ({
+            name: field.name || null,
+            value: field.value || null,
+            inline: Boolean(field.inline),
+        })),
+    };
+}
+
+function normalizeComponentsForComparison(rows) {
+    return rows.map((row) => ({
+        type: row.type ?? null,
+        components: (row.components || []).map((component) => ({
+            type: component.type ?? null,
+            style: component.style ?? null,
+            label: component.label || null,
+            customId: component.customId || component.custom_id || null,
+            url: component.url || null,
+            disabled: Boolean(component.disabled),
+        })),
+    }));
 }
 
 function hasStaffRole(interaction) {
@@ -2544,6 +2902,10 @@ function hasApprovedRole(interaction) {
 }
 
 function normalizeOptionalText(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+
     const normalized = value.trim();
     return normalized.length > 0 ? normalized : null;
 }
