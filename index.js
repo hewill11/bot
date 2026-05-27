@@ -5,6 +5,7 @@ const {
     Client,
     GatewayIntentBits,
     Events,
+    ChannelType,
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
@@ -63,6 +64,8 @@ const REJECT_APPLICATION_PREFIX = 'reject_application_';
 const APPROVE_COURT_PREFIX = 'approve_court_';
 const REJECT_COURT_PREFIX = 'reject_court_';
 const APPLICATION_COMMAND_NAMES = new Set(['анкета', 'заявка']);
+const APPLICATION_PANEL_COMMAND_NAMES = new Set(['панельзаявки', 'applicationpanel']);
+const COURT_PANEL_COMMAND_NAMES = new Set(['панельсуда', 'courtpanel']);
 const EVENT_COMMAND_NAMES = new Set(['ивент', 'event']);
 const EMBED_COMMAND_NAME = 'embed';
 const DEFAULT_COURT_PANEL_CHANNEL_ID = '1492315531922112604';
@@ -107,18 +110,6 @@ client.once(Events.ClientReady, async (readyClient) => {
     console.log(`Бот запущен как ${readyClient.user.tag}`);
 
     try {
-        await ensureApplicationPanel();
-    } catch (error) {
-        console.error('Не удалось проверить или отправить панель заявок:', error);
-    }
-
-    try {
-        await ensureCourtPanel();
-    } catch (error) {
-        console.error('Не удалось проверить или отправить панель судов:', error);
-    }
-
-    try {
         await synchronizeClosedModerationMessages();
     } catch (error) {
         console.error('Не удалось синхронизировать уже обработанные модераторские сообщения:', error);
@@ -150,6 +141,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (interaction.isChatInputCommand()) {
             if (APPLICATION_COMMAND_NAMES.has(interaction.commandName)) {
                 await handleApplicationOpen(interaction);
+                return;
+            }
+
+            if (APPLICATION_PANEL_COMMAND_NAMES.has(interaction.commandName)) {
+                await handleApplicationPanelCommand(interaction);
+                return;
+            }
+
+            if (COURT_PANEL_COMMAND_NAMES.has(interaction.commandName)) {
+                await handleCourtPanelCommand(interaction);
                 return;
             }
 
@@ -419,6 +420,16 @@ function buildEmbedBuilderBasicModal(draft) {
         .setCustomId(`${EMBED_BUILDER_MODAL_PREFIX}:basic`)
         .setTitle('Embed: текст');
 
+    const contentInput = new TextInputBuilder()
+        .setCustomId('message_content')
+        .setLabel('Текст сообщения (Markdown)')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false)
+        .setMaxLength(2000)
+        .setPlaceholder('# Большой заголовок\n## Подзаголовок\nОбычный текст, ссылки и т.д.');
+
+    setTextInputValue(contentInput, draft.content);
+
     const titleInput = new TextInputBuilder()
         .setCustomId('embed_title')
         .setLabel('Заголовок')
@@ -440,6 +451,7 @@ function buildEmbedBuilderBasicModal(draft) {
     setTextInputValue(descriptionInput, draft.description);
 
     modal.addComponents(
+        new ActionRowBuilder().addComponents(contentInput),
         new ActionRowBuilder().addComponents(titleInput),
         new ActionRowBuilder().addComponents(descriptionInput),
     );
@@ -588,11 +600,11 @@ function buildEmbedBuilderTargetModal(draft) {
 
     const channelInput = new TextInputBuilder()
         .setCustomId('embed_channel')
-        .setLabel('Канал ID, #упоминание или ссылка')
+        .setLabel('Канал, тред или ссылка')
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
         .setMaxLength(200)
-        .setPlaceholder('123456789012345678 или ссылка на сообщение');
+        .setPlaceholder('ID канала/треда или ссылка на сообщение');
 
     setTextInputValue(channelInput, draft.channelId);
 
@@ -606,9 +618,21 @@ function buildEmbedBuilderTargetModal(draft) {
 
     setTextInputValue(messageInput, draft.messageId);
 
+    const forumPostNameInput = new TextInputBuilder()
+        .setCustomId('embed_forum_post_name')
+        .setLabel('Название поста для форума')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(100)
+        .setPlaceholder('Нужно только если выбран forum-канал')
+        ;
+
+    setTextInputValue(forumPostNameInput, draft.forumPostName);
+
     modal.addComponents(
         new ActionRowBuilder().addComponents(channelInput),
         new ActionRowBuilder().addComponents(messageInput),
+        new ActionRowBuilder().addComponents(forumPostNameInput),
     );
 
     return modal;
@@ -888,68 +912,6 @@ function buildEventRegistrationLogEmbed(event, registration) {
         .setTimestamp();
 }
 
-async function ensureApplicationPanel() {
-    const panelChannel = await client.channels.fetch(process.env.PANEL_CHANNEL_ID);
-
-    if (!panelChannel || !panelChannel.isTextBased() || !('messages' in panelChannel)) {
-        throw new Error('PANEL_CHANNEL_ID не указывает на текстовый канал.');
-    }
-
-    const panelPayload = {
-        embeds: [buildApplicationPanelEmbed()],
-        components: buildApplicationPanelComponents(),
-    };
-
-    const recentMessages = await panelChannel.messages.fetch({ limit: 100 });
-    const existingPanel = recentMessages.find((message) =>
-        message.author.id === client.user.id &&
-        message.components.some((row) =>
-            row.components.some((component) => component.customId === OPEN_APPLICATION_BUTTON_ID),
-        ),
-    );
-
-    if (existingPanel) {
-        if (messageNeedsUpdate(existingPanel, panelPayload)) {
-            await existingPanel.edit(panelPayload).catch(() => {});
-        }
-        return;
-    }
-
-    await panelChannel.send({
-        ...panelPayload,
-    });
-}
-
-async function ensureCourtPanel() {
-    const panelChannel = await client.channels.fetch(getCourtPanelChannelId());
-
-    if (!panelChannel || !panelChannel.isTextBased() || !('messages' in panelChannel)) {
-        throw new Error('COURT_PANEL_CHANNEL_ID не указывает на текстовый канал.');
-    }
-
-    const panelPayload = {
-        embeds: [buildCourtPanelEmbed()],
-        components: buildCourtPanelComponents(),
-    };
-
-    const recentMessages = await panelChannel.messages.fetch({ limit: 100 });
-    const existingPanel = recentMessages.find((message) =>
-        message.author.id === client.user.id &&
-        message.components.some((row) =>
-            row.components.some((component) => component.customId === OPEN_COURT_BUTTON_ID),
-        ),
-    );
-
-    if (existingPanel) {
-        if (messageNeedsUpdate(existingPanel, panelPayload)) {
-            await existingPanel.edit(panelPayload).catch(() => {});
-        }
-        return;
-    }
-
-    await panelChannel.send(panelPayload);
-}
-
 async function handleApplicationOpen(interaction) {
     const blockReason = await getSubmissionBlockReason(interaction);
 
@@ -963,6 +925,54 @@ async function handleApplicationOpen(interaction) {
 
 async function handleCourtOpen(interaction) {
     await interaction.showModal(buildCourtModal());
+}
+
+async function handleApplicationPanelCommand(interaction) {
+    if (!hasStaffRole(interaction)) {
+        await replyEphemeral(interaction, 'У вас нет прав для отправки панели заявок.');
+        return;
+    }
+
+    const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
+
+    if (!isStandardMessageChannel(targetChannel)) {
+        await replyEphemeral(interaction, 'Для панели заявок нужен обычный текстовый канал или тред.');
+        return;
+    }
+
+    const panelMessage = await targetChannel.send({
+        embeds: [buildApplicationPanelEmbed()],
+        components: buildApplicationPanelComponents(),
+    });
+
+    await interaction.reply({
+        content: `Панель заявок отправлена в канал <#${targetChannel.id}>. ID сообщения: \`${panelMessage.id}\``,
+        ephemeral: true,
+    });
+}
+
+async function handleCourtPanelCommand(interaction) {
+    if (!hasStaffRole(interaction)) {
+        await replyEphemeral(interaction, 'У вас нет прав для отправки панели суда.');
+        return;
+    }
+
+    const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
+
+    if (!isStandardMessageChannel(targetChannel)) {
+        await replyEphemeral(interaction, 'Для панели суда нужен обычный текстовый канал или тред.');
+        return;
+    }
+
+    const panelMessage = await targetChannel.send({
+        embeds: [buildCourtPanelEmbed()],
+        components: buildCourtPanelComponents(),
+    });
+
+    await interaction.reply({
+        content: `Панель суда отправлена в канал <#${targetChannel.id}>. ID сообщения: \`${panelMessage.id}\``,
+        ephemeral: true,
+    });
 }
 
 async function handleEventPanelCommand(interaction) {
@@ -1033,8 +1043,8 @@ async function handleEmbedCommand(interaction) {
     let targetChannel = selectedChannel || interaction.channel;
     let messageId = interaction.options.getString('message_id');
 
-    if (!targetChannel || !targetChannel.isTextBased() || !('send' in targetChannel)) {
-        await replyEphemeral(interaction, 'Нужен текстовый канал, куда бот сможет отправить embed.');
+    if (!isEmbedTargetChannel(targetChannel)) {
+        await replyEphemeral(interaction, 'Нужен текстовый канал, тред или форум, куда бот сможет отправить сообщение.');
         return;
     }
 
@@ -1084,9 +1094,18 @@ async function handleEmbedCommand(interaction) {
 
             if (message.embeds.length > 0) {
                 draftData = createEmbedDraftDataFromEmbed(message.embeds[0]);
+                draftData.content = message.content || '';
+
+                if (isThreadChannel(message.channel)) {
+                    draftData.forumPostName = message.channel.name || '';
+                }
             } else {
-                await replyEphemeral(interaction, 'В этом сообщении нет embed для редактирования.');
-                return;
+                draftData.content = message.content || '';
+
+                if (!draftData.content) {
+                    await replyEphemeral(interaction, 'В этом сообщении нет ни embed, ни текста для редактирования.');
+                    return;
+                }
             }
         } catch (error) {
             console.error(error);
@@ -1599,7 +1618,7 @@ async function handleEmbedBuilderModalSubmit(interaction) {
 }
 
 async function sendEmbedDraft(interaction, draft) {
-    const built = buildEmbedFromDraft(draft);
+    const built = buildMessageFromDraft(draft);
 
     if (built.errors.length) {
         await interaction.update(buildEmbedBuilderPanelPayload(
@@ -1612,17 +1631,28 @@ async function sendEmbedDraft(interaction, draft) {
 
     const targetChannel = await client.channels.fetch(draft.channelId).catch(() => null);
 
-    if (!targetChannel || !targetChannel.isTextBased() || !('send' in targetChannel)) {
+    if (!isEmbedTargetChannel(targetChannel)) {
         await interaction.update(buildEmbedBuilderPanelPayload(
             draft,
-            'Не удалось найти канал назначения. Нажмите `Канал` и укажите канал заново.',
+            'Не удалось найти канал назначения. Нажмите `Канал` и укажите канал, тред или форум заново.',
             true,
         ));
         return;
     }
 
     try {
+        const messagePayload = buildDiscordMessagePayload(built);
+
         if (draft.messageId) {
+            if (isForumChannel(targetChannel)) {
+                await interaction.update(buildEmbedBuilderPanelPayload(
+                    draft,
+                    'Для редактирования сообщения на форуме укажите ссылку на сообщение из самого треда, а не ID forum-канала.',
+                    true,
+                ));
+                return;
+            }
+
             const messageToEdit = await targetChannel.messages.fetch(draft.messageId);
 
             if (messageToEdit.author.id !== client.user.id) {
@@ -1634,7 +1664,7 @@ async function sendEmbedDraft(interaction, draft) {
                 return;
             }
 
-            await messageToEdit.edit({ embeds: [built.embed] });
+            await messageToEdit.edit(messagePayload);
             deleteEmbedDraft(interaction.user.id);
             await interaction.update({
                 content: `Embed успешно обновлен в канале <#${targetChannel.id}>. ID сообщения: \`${messageToEdit.id}\``,
@@ -1644,7 +1674,31 @@ async function sendEmbedDraft(interaction, draft) {
             return;
         }
 
-        const sentMessage = await targetChannel.send({ embeds: [built.embed] });
+        if (isForumChannel(targetChannel)) {
+            if (!draft.forumPostName) {
+                await interaction.update(buildEmbedBuilderPanelPayload(
+                    draft,
+                    'Для forum-канала нужно указать название поста в кнопке `Канал`.',
+                    true,
+                ));
+                return;
+            }
+
+            const thread = await targetChannel.threads.create({
+                name: draft.forumPostName,
+                message: messagePayload,
+            });
+
+            deleteEmbedDraft(interaction.user.id);
+            await interaction.update({
+                content: `Пост с embed создан на форуме: <#${thread.id}>`,
+                embeds: [],
+                components: [],
+            });
+            return;
+        }
+
+        const sentMessage = await targetChannel.send(messagePayload);
         deleteEmbedDraft(interaction.user.id);
         await interaction.update({
             content: `Embed отправлен в канал <#${targetChannel.id}>. ID сообщения: \`${sentMessage.id}\``,
@@ -1829,6 +1883,7 @@ function deconstructEmbed(embed) {
 
 function createEmptyEmbedDraftData() {
     return {
+        content: '',
         title: '',
         description: '',
         color: '',
@@ -1840,6 +1895,7 @@ function createEmptyEmbedDraftData() {
         authorIconUrl: '',
         footer: '',
         footerIconUrl: '',
+        forumPostName: '',
     };
 }
 
@@ -1853,6 +1909,7 @@ function createEmbedDraftDataFromEmbed(embed) {
     const footerIcon = data.footer?.icon_url || data.footer?.iconURL || '';
 
     return {
+        content: '',
         title: data.title || '',
         description: data.description || '',
         color: data.color !== null && data.color !== undefined
@@ -1866,11 +1923,12 @@ function createEmbedDraftDataFromEmbed(embed) {
         authorIconUrl: authorIcon,
         footer: data.footer?.text || '',
         footerIconUrl: footerIcon,
+        forumPostName: '',
     };
 }
 
 function buildEmbedBuilderPanelPayload(draft, notice = null, includePreview = false) {
-    const built = buildEmbedFromDraft(draft);
+    const built = buildMessageFromDraft(draft);
     const statusLines = [
         'Черновик сохраняется после каждой модалки. Можно закрыть окно, сходить за ссылкой и открыть `/embed` снова.',
         '',
@@ -1889,6 +1947,8 @@ function buildEmbedBuilderPanelPayload(draft, notice = null, includePreview = fa
         draft.author ? 'автор' : null,
         draft.footer ? 'footer' : null,
         draft.timestamp ? 'timestamp' : null,
+        draft.content ? 'текст сообщения' : null,
+        draft.forumPostName ? 'название forum-поста' : null,
     ].filter(Boolean);
 
     const panelEmbed = new EmbedBuilder()
@@ -1905,6 +1965,13 @@ function buildEmbedBuilderPanelPayload(draft, notice = null, includePreview = fa
                 value: [
                     `Image: ${draft.imageUrl ? truncateText(draft.imageUrl, 140) : 'не задано'}`,
                     `Thumbnail: ${draft.thumbnailUrl ? truncateText(draft.thumbnailUrl, 140) : 'не задано'}`,
+                ].join('\n'),
+            },
+            {
+                name: 'Текст и форум',
+                value: [
+                    `Текст сообщения: ${draft.content ? truncateText(draft.content, 140) : 'не задан'}`,
+                    `Название forum-поста: ${draft.forumPostName ? truncateText(draft.forumPostName, 100) : 'не задано'}`,
                 ].join('\n'),
             },
         );
@@ -1925,7 +1992,16 @@ function buildEmbedBuilderPanelPayload(draft, notice = null, includePreview = fa
                 value: truncateText(built.errors.map((error) => `• ${error}`).join('\n'), 1024),
             });
         } else {
-            payload.embeds.push(built.embed);
+            if (built.content) {
+                payload.content = truncateText(
+                    `${notice ? `${notice}\n\n` : ''}${built.content}`,
+                    1900,
+                );
+            }
+
+            if (built.embed) {
+                payload.embeds.push(built.embed);
+            }
         }
     }
 
@@ -1978,6 +2054,7 @@ function parseEmbedBuilderModalUpdates(interaction, draft, section) {
         case 'basic':
             return {
                 values: {
+                    content: normalizeOptionalText(interaction.fields.getTextInputValue('message_content')) || '',
                     title: normalizeOptionalText(interaction.fields.getTextInputValue('embed_title')) || '',
                     description: normalizeOptionalText(interaction.fields.getTextInputValue('embed_description')) || '',
                 },
@@ -2079,6 +2156,7 @@ function parseEmbedBuilderMetaUpdates(interaction) {
 function parseEmbedBuilderTargetUpdates(interaction, draft) {
     const channelInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_channel'));
     const messageInput = normalizeOptionalText(interaction.fields.getTextInputValue('embed_message_id'));
+    const forumPostName = normalizeOptionalText(interaction.fields.getTextInputValue('embed_forum_post_name'));
     const channelTarget = parseDiscordMessageTarget(channelInput, 'channel');
     const messageTarget = parseDiscordMessageTarget(messageInput, 'message');
 
@@ -2098,11 +2176,12 @@ function parseEmbedBuilderTargetUpdates(interaction, draft) {
         values: {
             channelId: messageTarget.channelId || channelTarget.channelId || draft.channelId,
             messageId: messageInput ? messageTarget.messageId : (channelTarget.messageId || null),
+            forumPostName: forumPostName || '',
         },
     };
 }
 
-function buildEmbedFromDraft(draft) {
+function buildMessageFromDraft(draft) {
     const errors = [];
     const color = draft.color ? parseEmbedColor(draft.color) : null;
     const embedUrl = validateOptionalUrlForBuild(draft.url, 'Ссылка заголовка', errors);
@@ -2110,29 +2189,51 @@ function buildEmbedFromDraft(draft) {
     const thumbnailUrl = validateOptionalUrlForBuild(draft.thumbnailUrl, 'Thumbnail URL', errors);
     const authorIconUrl = validateOptionalUrlForBuild(draft.authorIconUrl, 'Иконка автора', errors);
     const footerIconUrl = validateOptionalUrlForBuild(draft.footerIconUrl, 'Иконка footer', errors);
+    const content = draft.content || '';
 
     if (draft.color && color === null) {
         errors.push('цвет должен быть в формате `#RRGGBB` или `RRGGBB`.');
     }
 
-    if (!draft.title &&
+    if (!content &&
+        !draft.title &&
         !draft.description &&
         !imageUrl &&
         !thumbnailUrl &&
         !draft.author &&
         !draft.footer) {
-        errors.push('заполните хотя бы текст, картинку, автора или footer.');
+        errors.push('заполните хотя бы текст сообщения, embed-текст, картинку, автора или footer.');
     }
 
     if (errors.length) {
         return {
+            content,
             embed: null,
             errors,
         };
     }
 
-    const embed = new EmbedBuilder()
-        .setColor(color ?? 0x5865F2);
+    const hasEmbedData = Boolean(
+        draft.title ||
+        draft.description ||
+        draft.color ||
+        embedUrl ||
+        imageUrl ||
+        thumbnailUrl ||
+        draft.author ||
+        draft.footer ||
+        draft.timestamp,
+    );
+
+    if (!hasEmbedData) {
+        return {
+            content,
+            embed: null,
+            errors,
+        };
+    }
+
+    const embed = new EmbedBuilder().setColor(color ?? 0x5865F2);
 
     if (draft.title) {
         embed.setTitle(draft.title);
@@ -2179,9 +2280,24 @@ function buildEmbedFromDraft(draft) {
     }
 
     return {
+        content,
         embed,
         errors,
     };
+}
+
+function buildDiscordMessagePayload(built) {
+    const payload = {};
+
+    if (built.content) {
+        payload.content = built.content;
+    }
+
+    if (built.embed) {
+        payload.embeds = [built.embed];
+    }
+
+    return payload;
 }
 
 function validateOptionalUrlInput(value, fieldName) {
@@ -2780,6 +2896,22 @@ function buildDiscordMessageUrl(guildId, channelId, messageId) {
     return `https://discord.com/channels/${guildId}/${channelId}/${messageId}`;
 }
 
+function isForumChannel(channel) {
+    return channel?.type === ChannelType.GuildForum;
+}
+
+function isThreadChannel(channel) {
+    return typeof channel?.isThread === 'function' && channel.isThread();
+}
+
+function isStandardMessageChannel(channel) {
+    return Boolean(channel?.isTextBased?.() && 'send' in channel);
+}
+
+function isEmbedTargetChannel(channel) {
+    return isStandardMessageChannel(channel) || isForumChannel(channel);
+}
+
 async function trySetMemberNickname(interaction, nickname) {
     if (!interaction.guild || !interaction.user || !nickname) {
         return {
@@ -2829,68 +2961,6 @@ function buildNicknameUpdateNotice(result) {
         default:
             return '';
     }
-}
-
-function messageNeedsUpdate(message, payload) {
-    const currentSnapshot = JSON.stringify({
-        content: message.content || '',
-        embeds: (message.embeds || []).map((embed) => normalizeEmbedForComparison(embed)),
-        components: normalizeComponentsForComparison(message.components || []),
-    });
-    const nextSnapshot = JSON.stringify({
-        content: payload.content || '',
-        embeds: (payload.embeds || []).map((embed) => normalizeEmbedForComparison(embed)),
-        components: normalizeComponentsForComparison(payload.components || []),
-    });
-
-    return currentSnapshot !== nextSnapshot;
-}
-
-function normalizeEmbedForComparison(embedLike) {
-    const embed = embedLike?.toJSON ? embedLike.toJSON() : (embedLike?.data || embedLike || {});
-    const authorIconUrl = embed.author?.icon_url || embed.author?.iconURL || null;
-    const footerIconUrl = embed.footer?.icon_url || embed.footer?.iconURL || null;
-
-    return {
-        title: embed.title || null,
-        description: embed.description || null,
-        color: embed.color ?? null,
-        url: embed.url || null,
-        imageUrl: embed.image?.url || null,
-        thumbnailUrl: embed.thumbnail?.url || null,
-        author: embed.author
-            ? {
-                name: embed.author.name || null,
-                iconUrl: authorIconUrl,
-                url: embed.author.url || null,
-            }
-            : null,
-        footer: embed.footer
-            ? {
-                text: embed.footer.text || null,
-                iconUrl: footerIconUrl,
-            }
-            : null,
-        fields: (embed.fields || []).map((field) => ({
-            name: field.name || null,
-            value: field.value || null,
-            inline: Boolean(field.inline),
-        })),
-    };
-}
-
-function normalizeComponentsForComparison(rows) {
-    return rows.map((row) => ({
-        type: row.type ?? null,
-        components: (row.components || []).map((component) => ({
-            type: component.type ?? null,
-            style: component.style ?? null,
-            label: component.label || null,
-            customId: component.customId || component.custom_id || null,
-            url: component.url || null,
-            disabled: Boolean(component.disabled),
-        })),
-    }));
 }
 
 function hasStaffRole(interaction) {

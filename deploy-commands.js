@@ -9,6 +9,42 @@ const commands = [
         .setName('заявка')
         .setDescription('Открыть анкету на Minecraft сервер'),
     new SlashCommandBuilder()
+        .setName('панельзаявки')
+        .setDescription('Отправить готовую панель заявок в канал')
+        .addChannelOption((option) =>
+            option
+                .setName('channel')
+                .setDescription('Канал, куда отправить панель заявок')
+                .setRequired(false),
+        ),
+    new SlashCommandBuilder()
+        .setName('applicationpanel')
+        .setDescription('Send the ready-made application panel')
+        .addChannelOption((option) =>
+            option
+                .setName('channel')
+                .setDescription('Channel where the application panel should be sent')
+                .setRequired(false),
+        ),
+    new SlashCommandBuilder()
+        .setName('панельсуда')
+        .setDescription('Отправить готовую панель суда в канал')
+        .addChannelOption((option) =>
+            option
+                .setName('channel')
+                .setDescription('Канал, куда отправить панель суда')
+                .setRequired(false),
+        ),
+    new SlashCommandBuilder()
+        .setName('courtpanel')
+        .setDescription('Send the ready-made court panel')
+        .addChannelOption((option) =>
+            option
+                .setName('channel')
+                .setDescription('Channel where the court panel should be sent')
+                .setRequired(false),
+        ),
+    new SlashCommandBuilder()
         .setName('ивент')
         .setDescription('Создать панель регистрации на ивент')
         .addChannelOption((option) =>
@@ -56,7 +92,7 @@ const commands = [
         .addChannelOption((option) =>
             option
                 .setName('channel')
-                .setDescription('Канал для отправки embed (по умолчанию текущий)')
+                .setDescription('Канал, тред или forum для отправки embed (по умолчанию текущий)')
                 .setRequired(false),
         )
         .addStringOption((option) =>
