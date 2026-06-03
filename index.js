@@ -41,6 +41,9 @@ const {
     saveEventRegistration,
 } = require('./storage/eventsStore');
 
+// --- Components V2 конструктор (новый, изолированный модуль) ---
+const componentsV2Editor = require('./componentsv2/editor');
+
 const PORT = Number(process.env.PORT) || 10000;
 const APPLICATION_MODAL_ID = 'minecraft_application_modal';
 const COURT_MODAL_ID = 'minecraft_court_modal';
@@ -88,6 +91,7 @@ ensureStoreFile();
 ensureCourtStoreFile();
 ensureEmbedDraftStoreFile();
 ensureEventStoreFile();
+componentsV2Editor.ensureStore(); // новый конструктор Components V2
 
 const app = express();
 const client = new Client({
@@ -138,6 +142,9 @@ process.on('uncaughtException', (error) => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
     try {
+        // Новый конструктор Components V2 — обрабатывает только свои интеракции
+        if (await componentsV2Editor.handleInteraction(interaction, client)) return;
+
         if (interaction.isChatInputCommand()) {
             if (APPLICATION_COMMAND_NAMES.has(interaction.commandName)) {
                 await handleApplicationOpen(interaction);

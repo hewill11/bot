@@ -1,6 +1,9 @@
 require('dotenv').config();
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 
+// Команды нового конструктора Components V2 (уже в JSON-формате)
+const componentsV2Editor = require('./componentsv2/editor');
+
 const commands = [
     new SlashCommandBuilder()
         .setName('анкета')
@@ -101,7 +104,9 @@ const commands = [
                 .setDescription('ID или ссылка на сообщение бота для редактирования')
                 .setRequired(false),
         ),
-].map((command) => command.toJSON());
+]
+    .map((command) => command.toJSON())
+    .concat(componentsV2Editor.commandData); // команды Components V2
 
 const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
 
